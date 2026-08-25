@@ -53,6 +53,9 @@ class Trade(Base):
     llm_context = Column(JSONB)
     status = Column(String(15), nullable=False)
     binance_order_id = Column(String(50))
+    # Total fees for this trade in USDT. Realized P&L is computed net of
+    # fees, which at a 1% target move consume a meaningful part of the edge.
+    fee_usdt = Column(Numeric, nullable=False, server_default="0")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 class WalletSnapshot(Base):

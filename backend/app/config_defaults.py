@@ -34,6 +34,14 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "component_heartbeat_max_age_seconds": 300,
     # Orders below this notional are not worth placing.
     "min_order_notional_usdt": 10.0,
+    # Components whose heartbeat must be healthy before any order. Never
+    # includes risk_engine itself — see risk_engine.check_component_health.
+    "required_healthy_components": ["binance_api", "data_feed"],
+    # Candles used to establish "normal" range/volume for the sanity check.
+    "volatility_lookback_candles": 100,
+    # A day-open wallet baseline older than this cannot be trusted to
+    # measure today's P&L (e.g. the bot was down for days).
+    "max_pnl_baseline_age_hours": 24,
 
     # --- Stage control (§5.3, §7, §10) ---
     "current_stage": "setup",  # setup | paper | live | halted
@@ -41,6 +49,21 @@ CONFIG_DEFAULTS: dict[str, object] = {
     # --- LLM advisor (§5.1) ---
     "llm_calls_per_day": 2,
     "llm_provider": "ollama",  # ollama | gemini
+
+    # --- Model registry scoring (§5.1) ---
+    # Weights for the components of a candidate model's score. Precision on
+    # the "up" class dominates because a false positive is a losing trade.
+    "model_scoring_weights": {
+        "precision_lift": 0.45,
+        "discrimination": 0.25,
+        "realized_win_rate": 0.30,
+    },
+    # A model that almost never fires gives too small a sample to trust its
+    # precision, and would trade too rarely to be useful.
+    "min_predicted_positive_rate": 0.02,
+    # Realized trading results only outweigh holdout metrics once there are
+    # enough closed trades to mean anything.
+    "min_trades_for_realized_score": 20,
 
     # --- Promotion gate (§5.4) ---
     "promotion_gate": {
