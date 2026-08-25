@@ -34,6 +34,14 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "component_heartbeat_max_age_seconds": 300,
     # Orders below this notional are not worth placing.
     "min_order_notional_usdt": 10.0,
+    # Components whose heartbeat must be healthy before any order. Never
+    # includes risk_engine itself — see risk_engine.check_component_health.
+    "required_healthy_components": ["binance_api", "data_feed"],
+    # Candles used to establish "normal" range/volume for the sanity check.
+    "volatility_lookback_candles": 100,
+    # A day-open wallet baseline older than this cannot be trusted to
+    # measure today's P&L (e.g. the bot was down for days).
+    "max_pnl_baseline_age_hours": 24,
 
     # --- Stage control (§5.3, §7, §10) ---
     "current_stage": "setup",  # setup | paper | live | halted
