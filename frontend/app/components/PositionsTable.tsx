@@ -40,6 +40,7 @@ export default function PositionsTable({
                 <th className="pb-2 pr-3 text-right font-medium">Qty</th>
                 <th className="pb-2 pr-3 text-right font-medium">Entry</th>
                 <th className="pb-2 pr-3 text-right font-medium">Current</th>
+                <th className="pb-2 pr-3 text-right font-medium">Stop</th>
                 <th className="pb-2 text-right font-medium">Unrealized</th>
               </tr>
             </thead>
@@ -64,6 +65,18 @@ export default function PositionsTable({
                     ) : (
                       money(position.current_price)
                     )}
+                  </td>
+                  <td
+                    className="py-2 pr-3 text-right font-mono tabular-nums text-zinc-500"
+                    title={
+                      position.stop_distance_pct !== null
+                        ? `${position.stop_distance_pct.toFixed(2)}% below entry (ATR-based, fixed at open)`
+                        : "No stop recorded"
+                    }
+                  >
+                    {position.stop_price === null
+                      ? "—"
+                      : money(position.stop_price)}
                   </td>
                   <td
                     className={`py-2 text-right font-mono tabular-nums ${

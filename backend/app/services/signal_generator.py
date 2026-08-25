@@ -91,11 +91,18 @@ def horizon_expiry(
     return opened_at + timedelta(minutes=minutes)
 
 
+# The three ways a position can close, recorded on the closing trade.
+EXIT_STOP = "stop_hit"
+EXIT_TARGET = "target_reached"
+EXIT_HORIZON = "horizon_elapsed"
+
+
 @dataclass
 class ExitDecision:
     should_exit: bool
     quantity: float = 0.0
     reason: str = ""
+    exit_reason: str | None = None
 
 
 def evaluate_exit(
@@ -106,34 +113,69 @@ def evaluate_exit(
     interval: str,
     target_move_pct: float,
     horizon_candles: int,
+    # Keyword-only: these were added after the first callers existed, and a
+    # positional call would silently bind `now` to `stop_price` — comparing
+    # a datetime against a price rather than failing loudly.
+    *,
+    stop_price: float | None = None,
+    candle_high: float | None = None,
+    candle_low: float | None = None,
     now: datetime | None = None,
 ) -> ExitDecision:
-    """Decide whether an open lot should be closed.
+    """Decide whether an open lot should be closed, and why.
 
-    Mirrors what the model was trained to predict: a rise of
-    `target_move_pct` within `horizon_candles`. Take the profit when that
-    target is met; otherwise close once the window has passed, since the
-    model's claim no longer applies to the position.
+    Three exits, checked in this fixed order:
 
-    This is not a stop-loss. A protective stop is a separate risk decision
-    and is deliberately not invented here.
+    1. **Stop hit** — price fell to the ATR-derived stop set at open.
+    2. **Target reached** — the rise the model predicted.
+    3. **Horizon elapsed** — the prediction window passed without either.
+
+    **Stop is checked first and wins ties**, and that ordering is a
+    deliberate, conservative choice. Within one candle we have only OHLC:
+    when the low breached the stop *and* the high reached the target, the
+    order they occurred in is unknowable. Resolving that ambiguity in favour
+    of the target would systematically overstate performance — and the
+    inflated win rate feeds the §5.4 promotion gate that decides whether
+    real money gets deployed. Assuming the worse of two unknowable orderings
+    is the only safe default.
+
+    When `candle_high`/`candle_low` are supplied, the extremes are used, so
+    a stop breached intra-candle is honoured even if the candle closed back
+    above it. With only `current_price` the two are mutually exclusive
+    anyway, since stop < entry < target.
     """
     now = now or datetime.now(timezone.utc)
     target_price = entry_price * (1.0 + target_move_pct / 100.0)
 
-    if current_price >= target_price:
+    low = candle_low if candle_low is not None else current_price
+    high = candle_high if candle_high is not None else current_price
+
+    # 1. Stop — checked before target; see docstring on tie resolution.
+    if stop_price is not None and low <= stop_price:
         return ExitDecision(
             True, remaining,
-            f"Target reached: {current_price:.8f} >= {target_price:.8f} "
-            f"({target_move_pct}% above entry).",
+            f"Stop hit: price {low:.8f} reached the stop at "
+            f"{stop_price:.8f} (set from ATR at open).",
+            EXIT_STOP,
         )
 
+    # 2. Target.
+    if high >= target_price:
+        return ExitDecision(
+            True, remaining,
+            f"Target reached: {high:.8f} >= {target_price:.8f} "
+            f"({target_move_pct}% above entry).",
+            EXIT_TARGET,
+        )
+
+    # 3. Horizon.
     expiry = horizon_expiry(opened_at, interval, horizon_candles)
     if now >= expiry:
         return ExitDecision(
             True, remaining,
             f"Prediction horizon elapsed at {expiry.isoformat()} without "
             f"reaching {target_price:.8f}; closing at {current_price:.8f}.",
+            EXIT_HORIZON,
         )
 
     return ExitDecision(False, 0.0, "Position still within its horizon.")

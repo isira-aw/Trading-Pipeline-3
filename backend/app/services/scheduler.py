@@ -40,6 +40,7 @@ from app.services.event_bus import (
 from app.services.model_registry import ModelRegistryError, promote_best_candidate
 from app.services.position_tracker import match_fifo
 from app.services.risk_engine import TradeProposal
+from app.services.atr import latest_atr, stop_price_for_long
 from app.services.signal_generator import evaluate_exit, generate_signal
 from app.services.training_pipeline import TrainingError, train_symbol
 from app.services.wallet_service import ensure_daily_baseline
@@ -215,6 +216,54 @@ async def trade_loop_job() -> None:
                 await alert_db.commit()
 
 
+async def compute_entry_stop(db, symbol: str, entry_price: float) -> float | None:
+    """ATR-derived stop for a new long position.
+
+    Returns None when ATR cannot be computed, and the caller skips the entry
+    rather than opening a position with no stop (§1.7) — an unbounded
+    position is worse than a missed one.
+    """
+    from app.services.training_pipeline import load_candles
+
+    interval = await get_config(db, "interval")
+    period = await get_config(db, "atr_period")
+    multiplier = await get_config(db, "atr_stop_multiplier")
+
+    candles = await load_candles(db, symbol, interval)
+    atr_value = latest_atr(candles, period)
+    if atr_value is None:
+        return None
+
+    stop = stop_price_for_long(entry_price, atr_value, multiplier)
+    logger.info(
+        "%s stop set at %.8f (entry %.8f, ATR(%d)=%.8f x %.2f).",
+        symbol, stop, entry_price, period, atr_value, multiplier,
+    )
+    return stop
+
+
+async def latest_candle_extremes(
+    db, symbol: str, interval: str
+) -> tuple[float | None, float | None]:
+    """High and low of the most recent candle, for intra-candle stop checks."""
+    from sqlalchemy import select
+
+    from app.db.models import Candle
+
+    row = (
+        await db.execute(
+            select(Candle.high, Candle.low)
+            .where(Candle.symbol == symbol, Candle.interval == interval)
+            .order_by(Candle.open_time.desc())
+            .limit(1)
+        )
+    ).first()
+
+    if row is None:
+        return None, None
+    return float(row[0]), float(row[1])
+
+
 async def _process_entries(db, stage: str, symbols: list[str]) -> None:
     for symbol in symbols:
         try:
@@ -239,12 +288,22 @@ async def _process_entries(db, stage: str, symbols: list[str]) -> None:
             if notional <= 0 or signal.price <= 0:
                 continue
 
+            # Volatility-scaled stop, computed once at open and stored on
+            # the entry (see signal_generator on why it does not move).
+            stop = await compute_entry_stop(db, symbol, signal.price)
+            if stop is None:
+                logger.warning(
+                    "No ATR available for %s; skipping entry rather than "
+                    "opening a position with no stop.", symbol,
+                )
+                continue
+
             proposal = TradeProposal(
                 symbol=symbol, side="buy", quantity=notional / signal.price,
                 price=signal.price, confidence=signal.confidence,
                 model_id=signal.model_id,
             )
-            outcome = await te.place_order(db, proposal, stage)
+            outcome = await te.place_order(db, proposal, stage, stop_price=stop)
             _publish_trade(symbol, "buy", outcome)
 
         except Exception:  # noqa: BLE001
@@ -269,11 +328,17 @@ async def _process_exits(db, stage: str, symbols: list[str]) -> None:
             if price <= 0:
                 continue
 
+            # The candle's extremes, so a stop breached intra-candle is
+            # honoured even if the candle closed back above it.
+            high, low = await latest_candle_extremes(db, lot.symbol, interval)
+
             decision = evaluate_exit(
                 entry_price=lot.price, opened_at=lot.opened_at,
                 remaining=lot.remaining, current_price=price,
                 interval=interval, target_move_pct=target_move,
                 horizon_candles=horizon,
+                stop_price=lot.stop_price,
+                candle_high=high, candle_low=low,
             )
             if not decision.should_exit:
                 continue
@@ -282,7 +347,9 @@ async def _process_exits(db, stage: str, symbols: list[str]) -> None:
                 symbol=lot.symbol, side="sell", quantity=decision.quantity,
                 price=price, confidence=None, model_id=None,
             )
-            outcome = await te.place_order(db, proposal, stage)
+            outcome = await te.place_order(
+                db, proposal, stage, exit_reason=decision.exit_reason
+            )
             _publish_trade(lot.symbol, "sell", outcome, decision.reason)
 
         except Exception:  # noqa: BLE001

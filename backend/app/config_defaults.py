@@ -22,6 +22,13 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "target_move_pct": 1.0,
     "target_horizon_candles": 1,
 
+    # --- Exit stops (trading-engine side, NOT risk_engine rules) ---
+    # ATR period and multiplier for volatility-scaled stops. The stop is an
+    # exit decision on an already-approved position; entry-side checks live
+    # in risk_engine and are deliberately kept separate.
+    "atr_period": 14,
+    "atr_stop_multiplier": 2.0,
+
     # --- Risk engine (§6, §11) ---
     "max_trades_per_day": 10,
     "max_position_pct": 10.0,

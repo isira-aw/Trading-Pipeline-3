@@ -86,7 +86,7 @@ class TestExitEvaluation:
 
     def test_holds_inside_horizon_below_target(self):
         decision = evaluate_exit(
-            100.0, NOW, 1.0, 100.5, "4h", 1.0, 1, NOW + timedelta(minutes=10)
+            100.0, NOW, 1.0, 100.5, "4h", 1.0, 1, now=NOW + timedelta(minutes=10)
         )
         assert not decision.should_exit
 
@@ -94,14 +94,14 @@ class TestExitEvaluation:
         """The model claimed a move within N candles; past that its
         prediction no longer applies to the position."""
         decision = evaluate_exit(
-            100.0, NOW, 1.0, 100.5, "4h", 1.0, 1, NOW + timedelta(hours=5)
+            100.0, NOW, 1.0, 100.5, "4h", 1.0, 1, now=NOW + timedelta(hours=5)
         )
         assert decision.should_exit
         assert "horizon elapsed" in decision.reason
 
     def test_exit_closes_the_whole_remaining_lot(self):
         decision = evaluate_exit(
-            100.0, NOW, 0.37, 105.0, "4h", 1.0, 1, NOW + timedelta(minutes=1)
+            100.0, NOW, 0.37, 105.0, "4h", 1.0, 1, now=NOW + timedelta(minutes=1)
         )
         assert decision.quantity == pytest.approx(0.37)
 

@@ -115,6 +115,14 @@ export default function TradesFeed({
                     >
                       {trade.status}
                     </span>
+                    {trade.exit_reason && (
+                      <span
+                        className="ml-1 rounded bg-zinc-500/15 px-1.5 py-0.5 text-xs text-zinc-600 dark:text-zinc-400"
+                        title="Why this position was closed"
+                      >
+                        {trade.exit_reason.replace(/_/g, " ")}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

@@ -44,6 +44,8 @@ async def list_trades(
                     float(row.model_confidence) if row.model_confidence is not None else None
                 ),
                 "fee_usdt": float(row.fee_usdt or 0),
+                "stop_price": float(row.stop_price) if row.stop_price is not None else None,
+                "exit_reason": row.exit_reason,
                 "created_at": row.created_at,
                 "needs_attention": bool(
                     (row.risk_notes or {}).get("reconcile", {}).get("needs_attention")
@@ -94,6 +96,12 @@ async def open_positions(db: AsyncSession = Depends(get_db)):
             ),
             "opened_at": lot.opened_at,
             "model_id": lot.model_id,
+            "stop_price": lot.stop_price,
+            # How far price can fall before the stop closes this position.
+            "stop_distance_pct": (
+                (lot.price - lot.stop_price) / lot.price * 100.0
+                if lot.stop_price else None
+            ),
         })
 
     return {"positions": positions}

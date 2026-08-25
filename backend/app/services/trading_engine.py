@@ -304,6 +304,8 @@ async def _submit_order(
     decision: risk_engine.RiskDecision,
     stage: str,
     risk_log_entry: RiskLog | None = None,
+    stop_price: float | None = None,
+    exit_reason: str | None = None,
 ) -> OrderOutcome:
     """Send an approved order to the exchange.
 
@@ -363,6 +365,10 @@ async def _submit_order(
         },
         status=STATUS_SUBMITTED,
         fee_usdt=0,
+        # Entry-side: the ATR stop, fixed for this position's life.
+        stop_price=stop_price,
+        # Exit-side: which of the three rules closed the position.
+        exit_reason=exit_reason,
     )
     db.add(trade)
 
@@ -451,6 +457,8 @@ async def place_order(
     proposal: risk_engine.TradeProposal,
     stage: str,
     now: datetime | None = None,
+    stop_price: float | None = None,
+    exit_reason: str | None = None,
 ) -> OrderOutcome:
     """Assess a proposal and, if approved, place it.
 
@@ -480,7 +488,9 @@ async def place_order(
             placed=False, decision=decision.decision, reason=decision.reason,
         )
 
-    return await _submit_order(db, proposal, decision, stage, entry)
+    return await _submit_order(
+        db, proposal, decision, stage, entry, stop_price, exit_reason
+    )
 
 
 # --------------------------------------------------------------------------
@@ -758,6 +768,7 @@ async def load_trade_records(
             created_at=row.created_at,
             model_id=str(row.model_id) if row.model_id else None,
             fee_usdt=float(row.fee_usdt or 0),
+            stop_price=float(row.stop_price) if row.stop_price is not None else None,
         )
         for row in rows
     ]

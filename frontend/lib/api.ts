@@ -96,6 +96,8 @@ export interface Trade {
   model_id: string | null;
   model_confidence: number | null;
   fee_usdt: number;
+  stop_price: number | null;
+  exit_reason: string | null;
   created_at: string;
   needs_attention: boolean;
 }
@@ -109,6 +111,8 @@ export interface Position {
   unrealized_pnl_pct: number | null;
   opened_at: string;
   model_id: string | null;
+  stop_price: number | null;
+  stop_distance_pct: number | null;
 }
 
 export interface Wallet {
