@@ -1,13 +1,17 @@
-from sqlalchemy import Column, Integer, String, Numeric, DateTime, JSON, ForeignKey, BigInteger
+from sqlalchemy import Column, Integer, String, Numeric, DateTime, ForeignKey, BigInteger, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.sql import func
-from sqlalchemy.dialects.postgresql import UUID, TSTZRANGE
+from sqlalchemy.dialects.postgresql import UUID, TSTZRANGE, JSONB
 import uuid
 
 Base = declarative_base()
 
 class Candle(Base):
     __tablename__ = "candles"
+    __table_args__ = (
+        # Required by §3 and relied on by the data downloader's ON CONFLICT upsert.
+        UniqueConstraint("symbol", "interval", "open_time", name="uq_candles_symbol_interval_open_time"),
+    )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     symbol = Column(String(20), nullable=False)
@@ -28,7 +32,7 @@ class Model(Base):
     file_path = Column(String, nullable=False)
     trained_at = Column(DateTime(timezone=True), nullable=False)
     training_data_range = Column(TSTZRANGE)
-    metrics = Column(JSON, nullable=False)
+    metrics = Column(JSONB, nullable=False)
     status = Column(String(20), nullable=False, default='candidate')
     notes = Column(String)
 
@@ -45,8 +49,8 @@ class Trade(Base):
     model_id = Column(UUID(as_uuid=True), ForeignKey('models.id'))
     model_confidence = Column(Numeric)
     risk_decision = Column(String(10), nullable=False)
-    risk_notes = Column(JSON)
-    llm_context = Column(JSON)
+    risk_notes = Column(JSONB)
+    llm_context = Column(JSONB)
     status = Column(String(15), nullable=False)
     binance_order_id = Column(String(50))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -56,7 +60,7 @@ class WalletSnapshot(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     stage = Column(String(10), nullable=False)
-    balances = Column(JSON, nullable=False)
+    balances = Column(JSONB, nullable=False)
     total_value_usdt = Column(Numeric, nullable=False)
     snapshot_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -65,7 +69,7 @@ class RiskLog(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     trade_id = Column(UUID(as_uuid=True), ForeignKey('trades.id'))
-    checks = Column(JSON, nullable=False)
+    checks = Column(JSONB, nullable=False)
     decision = Column(String(10), nullable=False)
     reason = Column(String)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -76,14 +80,14 @@ class LLMAdvisory(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     provider = Column(String(20), nullable=False)
     prompt = Column(String, nullable=False)
-    response = Column(JSON, nullable=False)
+    response = Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 class Config(Base):
     __tablename__ = "config"
 
     key = Column(String(100), primary_key=True)
-    value = Column(JSON, nullable=False)
+    value = Column(JSONB, nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
 class ComponentStatus(Base):

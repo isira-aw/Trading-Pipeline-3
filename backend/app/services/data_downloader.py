@@ -1,59 +1,147 @@
-from datetime import datetime, timezone, timedelta
+"""Historical candle downloader (§5.1).
+
+Pulls klines from Binance and upserts them into `candles`. Symbol list,
+interval and history length all come from the `config` table — never from
+hardcoded literals (Core Principle #1).
+
+Session ownership: every entry point here opens its own AsyncSession. These
+run as background tasks, which outlive the request that scheduled them, so a
+session injected via `Depends(get_db)` would already be closed by the time
+the work runs.
+"""
+
 import asyncio
-from app.services.binance_client import BinanceAPIClient
-from app.db.models import Candle
-from sqlalchemy.ext.asyncio import AsyncSession
+import logging
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
-async def download_historical_data(db: AsyncSession, symbol: str = "BTCUSDT", interval: str = "4h", years: int = 2):
-    # This acts as the data downloader service
-    client = BinanceAPIClient(testnet=True)
-    
-    # Calculate start date based on years requested
-    start_time = datetime.now(timezone.utc) - timedelta(days=365 * years)
-    start_str = start_time.strftime("%d %b, %Y")
-    
-    print(f"Downloading {symbol} data from {start_str}...")
-    
-    # Fetch klines (blocking call, in a real async environment we'd run this in an executor)
-    # python-binance is sync by default; we can use AsyncClient from binance.async_client if preferred,
-    # but since this is a background job, running it in executor is fine. For now, we just call it.
-    loop = asyncio.get_event_loop()
-    klines = await loop.run_in_executor(
-        None, 
-        lambda: client.get_historical_klines(symbol, interval, start_str)
+from app.db.models import Candle
+from app.db.session import AsyncSessionLocal
+from app.services.binance_client import get_market_data_client
+from app.services.config_service import get_config
+
+logger = logging.getLogger(__name__)
+
+# Binance returns klines as positional arrays.
+KLINE_OPEN_TIME = 0
+KLINE_OPEN = 1
+KLINE_HIGH = 2
+KLINE_LOW = 3
+KLINE_CLOSE = 4
+KLINE_VOLUME = 5
+
+# Rows per INSERT. Postgres caps a statement at 65535 bind parameters and
+# each candle binds 8, so batches keep large backfills under that ceiling.
+UPSERT_BATCH_SIZE = 1000
+
+
+async def _fetch_klines(symbol: str, interval: str, start_str: str) -> list:
+    """Fetch klines off the event loop — python-binance is synchronous."""
+    client = get_market_data_client()
+    return await asyncio.to_thread(
+        client.get_historical_klines, symbol, interval, start_str
     )
-    
-    if not klines:
-        print("No data fetched.")
-        return 0
 
-    print(f"Fetched {len(klines)} klines. Upserting to database...")
-    
-    # Klines format: [Open time, Open, High, Low, Close, Volume, Close time, Quote asset volume, Number of trades, Taker buy base asset volume, Taker buy quote asset volume, Ignore]
-    candles = []
+
+def _to_candle_rows(klines: list, symbol: str, interval: str) -> list[dict]:
+    rows = []
     for k in klines:
-        open_time = datetime.fromtimestamp(k[0] / 1000.0, tz=timezone.utc)
-        candles.append({
-            "symbol": symbol,
-            "interval": interval,
-            "open_time": open_time,
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
-        })
-    
-    # Upsert data using PostgreSQL's ON CONFLICT DO NOTHING (or DO UPDATE)
-    # We use DO NOTHING since historical candles shouldn't change
-    stmt = insert(Candle).values(candles)
-    stmt = stmt.on_conflict_do_nothing(
-        index_elements=['symbol', 'interval', 'open_time']
-    )
-    
-    await db.execute(stmt)
+        rows.append(
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "open_time": datetime.fromtimestamp(
+                    k[KLINE_OPEN_TIME] / 1000.0, tz=timezone.utc
+                ),
+                # Numeric columns: keep the exchange's decimal strings rather
+                # than round-tripping through float, which loses precision.
+                "open": k[KLINE_OPEN],
+                "high": k[KLINE_HIGH],
+                "low": k[KLINE_LOW],
+                "close": k[KLINE_CLOSE],
+                "volume": k[KLINE_VOLUME],
+            }
+        )
+    return rows
+
+
+async def _upsert_candles(db: AsyncSession, rows: list[dict]) -> int:
+    """Insert candles, skipping ones already stored. Historical candles are
+    immutable once closed, so a conflict means we already have it."""
+    written = 0
+    for start in range(0, len(rows), UPSERT_BATCH_SIZE):
+        batch = rows[start : start + UPSERT_BATCH_SIZE]
+        stmt = insert(Candle).values(batch)
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=["symbol", "interval", "open_time"]
+        )
+        result = await db.execute(stmt)
+        written += result.rowcount or 0
+    return written
+
+
+async def download_symbol(
+    db: AsyncSession,
+    symbol: str,
+    interval: str | None = None,
+    history_years: int | None = None,
+) -> dict:
+    """Download and store history for one symbol. Caller owns the session."""
+    if interval is None:
+        interval = await get_config(db, "interval")
+    if history_years is None:
+        history_years = await get_config(db, "history_years")
+
+    start_time = datetime.now(timezone.utc) - timedelta(days=365 * history_years)
+    start_str = start_time.strftime("%d %b, %Y")
+
+    logger.info("Downloading %s %s candles from %s", symbol, interval, start_str)
+    klines = await _fetch_klines(symbol, interval, start_str)
+
+    if not klines:
+        logger.warning("No klines returned for %s %s", symbol, interval)
+        return {"symbol": symbol, "fetched": 0, "inserted": 0}
+
+    rows = _to_candle_rows(klines, symbol, interval)
+    inserted = await _upsert_candles(db, rows)
     await db.commit()
-    
-    print("Download and upsert complete.")
-    return len(candles)
+
+    logger.info(
+        "%s: fetched %d klines, inserted %d new", symbol, len(rows), inserted
+    )
+    return {"symbol": symbol, "fetched": len(rows), "inserted": inserted}
+
+
+async def download_historical_data(
+    symbols: list[str] | None = None,
+    interval: str | None = None,
+    history_years: int | None = None,
+) -> dict:
+    """Background-task entry point: download every configured symbol.
+
+    Opens its own session — see the module docstring on session ownership.
+    A failure on one symbol is logged and does not abort the others.
+    """
+    async with AsyncSessionLocal() as db:
+        if symbols is None:
+            symbols = await get_config(db, "symbols")
+        if interval is None:
+            interval = await get_config(db, "interval")
+        if history_years is None:
+            history_years = await get_config(db, "history_years")
+
+        results = []
+        for symbol in symbols:
+            try:
+                results.append(
+                    await download_symbol(db, symbol, interval, history_years)
+                )
+            except Exception:
+                # §1.7 fail loudly, but one bad symbol must not sink the rest.
+                logger.exception("Download failed for %s", symbol)
+                await db.rollback()
+                results.append({"symbol": symbol, "error": True})
+
+    return {"results": results}
