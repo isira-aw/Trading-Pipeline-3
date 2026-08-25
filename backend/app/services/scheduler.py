@@ -508,6 +508,45 @@ async def run_startup_reconciliation() -> None:
             await db.rollback()
 
 
+async def reschedule_jobs() -> bool:
+    """Rebuild job triggers from the current config (§8.3 "no restart needed").
+
+    Interval values are baked into a trigger when the job is added, so a
+    changed interval in the config table has no effect until the trigger is
+    replaced. Everything else the jobs read is fetched per run and needs no
+    action here.
+
+    Returns False when the scheduler is not running (nothing to reschedule).
+    """
+    global scheduler
+
+    if scheduler is None or not scheduler.running:
+        return False
+
+    async with AsyncSessionLocal() as db:
+        trade_minutes = await get_config(db, "trade_loop_interval_minutes")
+        heartbeat_seconds = await get_config(db, "heartbeat_interval_seconds")
+        reconcile_minutes = await get_config(db, "reconcile_interval_minutes")
+        retrain_hours = await get_config(db, "retrain_interval_hours")
+        refresh_hour = await get_config(db, "data_refresh_hour_utc")
+
+    scheduler.reschedule_job("trade_loop", trigger=IntervalTrigger(minutes=trade_minutes))
+    scheduler.reschedule_job("heartbeat", trigger=IntervalTrigger(seconds=heartbeat_seconds))
+    scheduler.reschedule_job("reconcile", trigger=IntervalTrigger(minutes=reconcile_minutes))
+    scheduler.reschedule_job("retrain", trigger=IntervalTrigger(hours=retrain_hours))
+    scheduler.reschedule_job(
+        "data_refresh", trigger=CronTrigger(hour=refresh_hour, minute=0)
+    )
+
+    logger.info(
+        "Rescheduled jobs: trade loop %smin, heartbeat %ss, reconcile %smin, "
+        "retrain %sh.",
+        trade_minutes, heartbeat_seconds, reconcile_minutes, retrain_hours,
+    )
+    bus.publish(EVENT_SYSTEM, {"level": "info", "message": "Schedule updated."})
+    return True
+
+
 async def shutdown_scheduler() -> None:
     global scheduler
     if scheduler is not None and scheduler.running:

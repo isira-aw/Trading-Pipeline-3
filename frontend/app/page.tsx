@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import NavBar from "@/app/components/NavBar";
 import PositionsTable from "@/app/components/PositionsTable";
 import StatusStrip from "@/app/components/StatusStrip";
 import TradesFeed from "@/app/components/TradesFeed";
@@ -170,6 +171,7 @@ export default function Dashboard() {
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-semibold">Trading Pipeline</h1>
+            <NavBar />
             <span
               className={`rounded px-2 py-0.5 text-xs font-medium uppercase text-white ${
                 STAGE_STYLES[stage] ?? "bg-zinc-500"

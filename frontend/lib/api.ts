@@ -51,6 +51,32 @@ export async function apiPost<T>(
   }
 }
 
+export async function apiPut<T>(
+  path: string,
+  body?: unknown,
+): Promise<ApiResult<T>> {
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null);
+      return {
+        ok: false,
+        error: detail?.detail ?? `${response.status} ${response.statusText}`,
+      };
+    }
+    return { ok: true, data: (await response.json()) as T };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Network error",
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Response shapes
 // ---------------------------------------------------------------------------
@@ -123,6 +149,59 @@ export interface Wallet {
   live_error: string | null;
   history: { at: string; total_value_usdt: number }[];
 }
+
+export interface ModelRow {
+  id: string;
+  symbol: string;
+  model_type: string;
+  status: string;
+  trained_at: string;
+  notes: string | null;
+  file_size_bytes: number | null;
+  file_missing: boolean;
+  metrics: Record<string, number | null>;
+  score: number;
+  score_breakdown: Record<string, number>;
+  disqualified: boolean;
+  disqualified_reason: string | null;
+  used_realized_stats: boolean;
+  realized: {
+    closed_trades: number;
+    win_rate: number | null;
+    total_realized_pnl: number;
+    max_drawdown_pct: number;
+  };
+}
+
+export interface ModelsResponse {
+  models: ModelRow[];
+  scoring_weights: Record<string, number>;
+  min_predicted_positive_rate: number;
+  min_trades_for_realized_score: number;
+}
+
+export interface ConfigResponse {
+  config: Record<string, unknown>;
+  defaults: Record<string, unknown>;
+  readonly_keys: string[];
+  schedule_keys: string[];
+  pin_is_default: boolean;
+}
+
+export const getModels = () => apiGet<ModelsResponse>("/api/models");
+export const promoteModel = (id: string, force = false) =>
+  apiPost(`/api/models/${id}/promote?force=${force}`);
+export const archiveModel = (id: string) => apiPost(`/api/models/${id}/archive`);
+export const promoteBest = (symbol: string) =>
+  apiPost(`/api/models/${symbol}/promote-best`);
+export const trainSymbol = (symbol: string) =>
+  apiPost(`/api/models/train/${symbol}`);
+
+export const getConfig = () => apiGet<ConfigResponse>("/api/config");
+export const updateConfig = (key: string, value: unknown) =>
+  apiPut(`/api/config/${key}`, { value });
+export const changePin = (current_pin: string, new_pin: string) =>
+  apiPost<{ changed: boolean }>("/api/config/pin", { current_pin, new_pin });
 
 export const getStatus = () => apiGet<SystemStatus>("/api/status");
 export const getTrades = () => apiGet<{ trades: Trade[] }>("/api/trades?limit=25");
