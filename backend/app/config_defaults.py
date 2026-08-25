@@ -42,6 +42,21 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "llm_calls_per_day": 2,
     "llm_provider": "ollama",  # ollama | gemini
 
+    # --- Model registry scoring (§5.1) ---
+    # Weights for the components of a candidate model's score. Precision on
+    # the "up" class dominates because a false positive is a losing trade.
+    "model_scoring_weights": {
+        "precision_lift": 0.45,
+        "discrimination": 0.25,
+        "realized_win_rate": 0.30,
+    },
+    # A model that almost never fires gives too small a sample to trust its
+    # precision, and would trade too rarely to be useful.
+    "min_predicted_positive_rate": 0.02,
+    # Realized trading results only outweigh holdout metrics once there are
+    # enough closed trades to mean anything.
+    "min_trades_for_realized_score": 20,
+
     # --- Promotion gate (§5.4) ---
     "promotion_gate": {
         "min_paper_trading_days": 30,
