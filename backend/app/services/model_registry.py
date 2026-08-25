@@ -22,11 +22,12 @@ stays on disk, so any promotion is reversible (§5.1).
 import logging
 from pathlib import Path
 
-from sqlalchemy import case, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from xgboost import XGBClassifier
 
 from app.db.models import Model, Trade
+from app.services.position_tracker import match_fifo
 from app.services.config_service import get_config
 
 logger = logging.getLogger(__name__)
@@ -120,30 +121,30 @@ def score_model(
     }
 
 
-async def get_trading_stats(db: AsyncSession, model_id) -> dict:
-    """Realized results for a model, from filled trades (§5.1).
+async def get_trading_stats(db: AsyncSession, model_id, stage: str | None = None) -> dict:
+    """Realized results for a model, from closed positions (§5.1).
 
-    Win rate is computed over *sell* fills, since a position's outcome is
-    only known once it is closed.
+    Positions are matched FIFO and attributed to the model that opened them,
+    so a model's win rate reflects the entries it actually signalled. Win
+    rate is net of fees — see `position_tracker`.
+
+    `win_rate` is None when nothing has closed yet, which the scorer treats
+    as "no data" rather than a 0% win rate.
     """
-    result = await db.execute(
-        select(
-            func.count(Trade.id),
-            func.sum(case((Trade.side == "sell", 1), else_=0)),
-        ).where(Trade.model_id == model_id, Trade.status == "filled")
-    )
-    total, closed = result.one()
-    closed = closed or 0
+    from app.services.position_tracker import compute_stats
+    from app.services.trading_engine import load_trade_records
 
-    # Placeholder until the trading engine records realized P&L per closed
-    # position (step 8). Reported explicitly so scoring can tell "no data"
-    # from "genuinely 0% win rate".
-    return {
-        "filled_trades": int(total or 0),
-        "closed_trades": int(closed),
-        "win_rate": None,
-        "pnl_available": False,
-    }
+    if stage is None:
+        stage = await get_config(db, "current_stage")
+
+    trades = await load_trade_records(db, stage)
+    matched = match_fifo(trades)
+
+    owned = [p for p in matched.closed if p.model_id == str(model_id)]
+    stats = compute_stats(owned)
+    stats["pnl_available"] = bool(owned)
+    stats["stage"] = stage
+    return stats
 
 
 async def score_candidates(db: AsyncSession, symbol: str) -> list[dict]:
@@ -162,8 +163,8 @@ async def score_candidates(db: AsyncSession, symbol: str) -> list[dict]:
     scored = []
     for model in candidates:
         stats = await get_trading_stats(db, model.id)
-        # win_rate is None until step 8 records realized P&L; treat that as
-        # "no realized data" rather than feeding None into the score.
+        # win_rate is None until this model has closed positions; treat that
+        # as "no realized data" rather than feeding None into the score.
         usable_stats = stats if stats["win_rate"] is not None else None
 
         scoring = score_model(
