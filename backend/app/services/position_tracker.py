@@ -38,6 +38,8 @@ class TradeRecord:
     created_at: datetime
     model_id: str | None = None
     fee_usdt: float = 0.0
+    # Set on entries: the ATR-derived stop fixed at open.
+    stop_price: float | None = None
 
     @property
     def fee_per_unit(self) -> float:
@@ -56,6 +58,7 @@ class OpenLot:
     opened_at: datetime
     model_id: str | None
     fee_per_unit: float
+    stop_price: float | None = None
 
     @property
     def cost_basis(self) -> float:
@@ -144,6 +147,7 @@ def match_fifo(trades: list[TradeRecord]) -> MatchResult:
                     opened_at=trade.created_at,
                     model_id=trade.model_id,
                     fee_per_unit=trade.fee_per_unit,
+                    stop_price=trade.stop_price,
                 )
             )
             continue

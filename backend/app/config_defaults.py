@@ -22,6 +22,13 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "target_move_pct": 1.0,
     "target_horizon_candles": 1,
 
+    # --- Exit stops (trading-engine side, NOT risk_engine rules) ---
+    # ATR period and multiplier for volatility-scaled stops. The stop is an
+    # exit decision on an already-approved position; entry-side checks live
+    # in risk_engine and are deliberately kept separate.
+    "atr_period": 14,
+    "atr_stop_multiplier": 2.0,
+
     # --- Risk engine (§6, §11) ---
     "max_trades_per_day": 10,
     "max_position_pct": 10.0,
@@ -42,6 +49,25 @@ CONFIG_DEFAULTS: dict[str, object] = {
     # A day-open wallet baseline older than this cannot be trusted to
     # measure today's P&L (e.g. the bot was down for days).
     "max_pnl_baseline_age_hours": 24,
+
+    # --- Scheduler (§4, §5.1) ---
+    # How often the paper trade loop evaluates each symbol.
+    "trade_loop_interval_minutes": 15,
+    # How often component heartbeats are refreshed.
+    "heartbeat_interval_seconds": 60,
+    # How often unresolved orders are re-checked against the exchange.
+    "reconcile_interval_minutes": 5,
+    # Daily candle top-up, at this UTC hour.
+    "data_refresh_hour_utc": 0,
+    # Master switch for the trade loop — the Start/Stop control (§8.1).
+    "trading_enabled": False,
+
+    # --- Order reconciliation ---
+    # Attempts before an unresolved order is escalated for manual attention.
+    "reconcile_max_attempts": 6,
+    # Exponential backoff between attempts, in seconds, capped.
+    "reconcile_backoff_base_seconds": 30,
+    "reconcile_backoff_max_seconds": 1800,
 
     # --- Stage control (§5.3, §7, §10) ---
     "current_stage": "setup",  # setup | paper | live | halted
@@ -81,4 +107,7 @@ COMPONENTS = [
     "risk_engine",
     "llm_advisor",
     "scheduler",
+    # Not a §8.1 component, but surfaces orders stuck after retry exhaustion
+    # so they are visible rather than silently unresolved.
+    "order_reconciliation",
 ]

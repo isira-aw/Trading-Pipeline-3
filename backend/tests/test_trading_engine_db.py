@@ -629,3 +629,126 @@ class TestLiveStageBlocked:
     async def test_paper_stage_is_unaffected(self, db):
         te.assert_paper_stage("paper")
         te.assert_paper_stage(TEST_STAGE)
+
+
+# --------------------------------------------------------------------------
+# 7. Reconciliation retry, backoff and escalation
+# --------------------------------------------------------------------------
+
+
+class TestReconcileRetryAndEscalation:
+    async def _orphan(self, db):
+        trade = Trade(
+            id=uuid.uuid4(), stage=TEST_STAGE, symbol=SYMBOL, side="buy",
+            order_type="market", quantity=1.0, price=None,
+            risk_decision="approved", status=te.STATUS_SUBMITTED, created_at=NOW,
+        )
+        db.add(trade)
+        await db.commit()
+        return trade
+
+    @staticmethod
+    def _failing_lookup():
+        async def fake(client, symbol, client_order_id):
+            raise ConnectionError("temporary network failure")
+        return fake
+
+    async def test_first_failure_records_backoff_not_escalation(self, db):
+        trade = await self._orphan(db)
+
+        with patch.object(te, "_fetch_order", self._failing_lookup()):
+            results = await te.reconcile_open_orders(db, TEST_STAGE)
+
+        assert results[0]["attempts"] == 1
+        assert not results[0]["needs_attention"]
+        assert results[0]["retry_in_seconds"] == 30
+
+        await db.refresh(trade)
+        state = trade.risk_notes["reconcile"]
+        assert state["attempts"] == 1
+        assert state["needs_attention"] is False
+        assert "next_attempt_at" in state
+
+    async def test_order_inside_backoff_is_skipped(self, db):
+        """A retry storm against an unreachable exchange helps nobody."""
+        await self._orphan(db)
+
+        with patch.object(te, "_fetch_order", self._failing_lookup()):
+            first = await te.reconcile_open_orders(db, TEST_STAGE)
+            assert len(first) == 1
+            # Immediately again — still inside the 30s window.
+            second = await te.reconcile_open_orders(db, TEST_STAGE)
+
+        assert second == []
+
+    async def test_escalates_after_the_attempt_cap(self, db):
+        trade = await self._orphan(db)
+        max_attempts = 6
+
+        with patch.object(te, "_fetch_order", self._failing_lookup()):
+            for _ in range(max_attempts):
+                # Force each attempt to be due by clearing the backoff.
+                state = dict(te._reconcile_state(trade))
+                state.pop("next_attempt_at", None)
+                te._set_reconcile_state(trade, state)
+                await db.commit()
+                results = await te.reconcile_open_orders(db, TEST_STAGE)
+
+        assert results[0]["needs_attention"]
+        assert results[0]["attempts"] == max_attempts
+
+        await db.refresh(trade)
+        assert trade.risk_notes["reconcile"]["needs_attention"] is True
+        # Still unresolved — escalation is not a resolution.
+        assert trade.status == te.STATUS_SUBMITTED
+
+    async def test_escalated_order_surfaces_on_component_status(self, db):
+        """The alert path: it must be visible on the dashboard, not just in
+        the log (§1.7, §8.1)."""
+        trade = await self._orphan(db)
+        te._set_reconcile_state(trade, {"attempts": 6, "needs_attention": True})
+        await db.commit()
+
+        count = await te.refresh_reconciliation_alert(db, TEST_STAGE)
+
+        assert count == 1
+        row = await db.get(ComponentStatus, te.COMPONENT_RECONCILIATION)
+        assert row.status == "error"
+        assert str(trade.id) in row.detail
+
+    async def test_alert_clears_once_nothing_is_stuck(self, db):
+        await te.refresh_reconciliation_alert(db, TEST_STAGE)
+        row = await db.get(ComponentStatus, te.COMPONENT_RECONCILIATION)
+        assert row.status == "online"
+
+    async def test_escalated_orders_are_listed_for_the_dashboard(self, db):
+        trade = await self._orphan(db)
+        te._set_reconcile_state(trade, {"attempts": 6, "needs_attention": True})
+        await db.commit()
+
+        stuck = await te.get_orders_needing_attention(db, TEST_STAGE)
+        assert [str(t.id) for t in stuck] == [str(trade.id)]
+
+    async def test_successful_retry_clears_the_retry_state(self, db):
+        trade = await self._orphan(db)
+
+        with patch.object(te, "_fetch_order", self._failing_lookup()):
+            await te.reconcile_open_orders(db, TEST_STAGE)
+
+        async def succeeds(client, symbol, client_order_id):
+            return fill_response(order_id=42, qty="1", quote="100")
+
+        # Clear the backoff so the retry is due.
+        state = dict(te._reconcile_state(trade))
+        state.pop("next_attempt_at", None)
+        te._set_reconcile_state(trade, state)
+        await db.commit()
+
+        with patch.object(te, "_fetch_order", succeeds), \
+             patch.object(te, "snapshot_wallet", lambda db, stage: _noop()):
+            results = await te.reconcile_open_orders(db, TEST_STAGE)
+
+        assert results[0]["resolved"]
+        await db.refresh(trade)
+        assert trade.status == te.STATUS_FILLED
+        assert trade.risk_notes["reconcile"]["attempts"] == 0

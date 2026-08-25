@@ -56,6 +56,10 @@ class Trade(Base):
     # Total fees for this trade in USDT. Realized P&L is computed net of
     # fees, which at a 1% target move consume a meaningful part of the edge.
     fee_usdt = Column(Numeric, nullable=False, server_default="0")
+    # Set on the ENTRY (buy) trade: the ATR-derived stop, fixed at open.
+    stop_price = Column(Numeric)
+    # Set on the EXIT (sell) trade: stop_hit | target_reached | horizon_elapsed.
+    exit_reason = Column(String(20))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 class WalletSnapshot(Base):

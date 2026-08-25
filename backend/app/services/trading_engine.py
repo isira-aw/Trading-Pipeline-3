@@ -26,7 +26,7 @@ Three invariants this module exists to hold:
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 
 from sqlalchemy import select
@@ -304,6 +304,8 @@ async def _submit_order(
     decision: risk_engine.RiskDecision,
     stage: str,
     risk_log_entry: RiskLog | None = None,
+    stop_price: float | None = None,
+    exit_reason: str | None = None,
 ) -> OrderOutcome:
     """Send an approved order to the exchange.
 
@@ -363,6 +365,10 @@ async def _submit_order(
         },
         status=STATUS_SUBMITTED,
         fee_usdt=0,
+        # Entry-side: the ATR stop, fixed for this position's life.
+        stop_price=stop_price,
+        # Exit-side: which of the three rules closed the position.
+        exit_reason=exit_reason,
     )
     db.add(trade)
 
@@ -451,6 +457,8 @@ async def place_order(
     proposal: risk_engine.TradeProposal,
     stage: str,
     now: datetime | None = None,
+    stop_price: float | None = None,
+    exit_reason: str | None = None,
 ) -> OrderOutcome:
     """Assess a proposal and, if approved, place it.
 
@@ -480,12 +488,88 @@ async def place_order(
             placed=False, decision=decision.decision, reason=decision.reason,
         )
 
-    return await _submit_order(db, proposal, decision, stage, entry)
+    return await _submit_order(
+        db, proposal, decision, stage, entry, stop_price, exit_reason
+    )
 
 
 # --------------------------------------------------------------------------
 # Reconciliation
 # --------------------------------------------------------------------------
+
+
+COMPONENT_RECONCILIATION = "order_reconciliation"
+
+
+def _reconcile_state(trade: Trade) -> dict:
+    return (trade.risk_notes or {}).get("reconcile", {})
+
+
+def _set_reconcile_state(trade: Trade, state: dict) -> None:
+    # JSONB columns need a new object to be seen as dirty by the ORM.
+    trade.risk_notes = {**(trade.risk_notes or {}), "reconcile": state}
+
+
+def backoff_seconds(attempts: int, base: float, maximum: float) -> float:
+    """Exponential backoff, capped. `attempts` is the count already made."""
+    return min(base * (2 ** max(0, attempts - 1)), maximum)
+
+
+def is_due_for_retry(trade: Trade, now: datetime) -> bool:
+    """Whether an unresolved order's backoff window has elapsed.
+
+    An order that has already been escalated stops being retried
+    automatically — it needs a human to look at it.
+    """
+    state = _reconcile_state(trade)
+    if state.get("needs_attention"):
+        return False
+
+    next_attempt = state.get("next_attempt_at")
+    if not next_attempt:
+        return True
+    return now >= datetime.fromisoformat(next_attempt)
+
+
+async def get_orders_needing_attention(db: AsyncSession, stage: str) -> list[Trade]:
+    """Unresolved orders that exhausted their retries (§1.7, §8.1).
+
+    These are the dangerous ones: we do not know whether a position was
+    opened, so the account view may be wrong.
+    """
+    rows = (
+        await db.execute(
+            select(Trade).where(
+                Trade.stage == stage, Trade.status.in_(UNRESOLVED_STATUSES)
+            )
+        )
+    ).scalars().all()
+    return [t for t in rows if _reconcile_state(t).get("needs_attention")]
+
+
+async def refresh_reconciliation_alert(db: AsyncSession, stage: str) -> int:
+    """Surface stuck orders on `component_status` so they appear on the
+    dashboard rather than sitting unresolved and invisible.
+
+    Deliberately not added to `required_healthy_components` by default: an
+    unresolved order means an unknown position, but hard-blocking all
+    trading on it could strand the system if the exchange stays unreachable.
+    Add it to that config list if you want the stricter behaviour.
+    """
+    stuck = await get_orders_needing_attention(db, stage)
+    if stuck:
+        await set_component_status(
+            db, COMPONENT_RECONCILIATION, "error",
+            f"{len(stuck)} order(s) could not be reconciled after the retry "
+            f"limit — position state may be wrong. Trade ids: "
+            f"{', '.join(str(t.id) for t in stuck[:5])}",
+        )
+    else:
+        await set_component_status(
+            db, COMPONENT_RECONCILIATION, "online", "No unresolved orders."
+        )
+    await db.commit()
+    return len(stuck)
 
 
 async def reconcile_open_orders(db: AsyncSession, stage: str) -> list[dict]:
@@ -499,7 +583,12 @@ async def reconcile_open_orders(db: AsyncSession, stage: str) -> list[dict]:
     that happened before the exchange's order id was recorded is still
     recoverable.
     """
-    rows = (
+    now = datetime.now(timezone.utc)
+    max_attempts = await get_config(db, "reconcile_max_attempts")
+    backoff_base = await get_config(db, "reconcile_backoff_base_seconds")
+    backoff_max = await get_config(db, "reconcile_backoff_max_seconds")
+
+    unresolved = (
         await db.execute(
             select(Trade).where(
                 Trade.stage == stage, Trade.status.in_(UNRESOLVED_STATUSES)
@@ -507,12 +596,19 @@ async def reconcile_open_orders(db: AsyncSession, stage: str) -> list[dict]:
         )
     ).scalars().all()
 
+    # Skip rows still inside their backoff window, and ones already escalated.
+    rows = [t for t in unresolved if is_due_for_retry(t, now)]
+
     if not rows:
-        logger.info("Reconciliation: no unresolved orders for stage '%s'.", stage)
+        logger.info(
+            "Reconciliation: nothing due for stage '%s' (%d unresolved, none due).",
+            stage, len(unresolved),
+        )
+        await refresh_reconciliation_alert(db, stage)
         return []
 
     logger.warning(
-        "Reconciliation: %d unresolved order(s) for stage '%s'.", len(rows), stage
+        "Reconciliation: %d order(s) due for stage '%s'.", len(rows), stage
     )
 
     client = get_trading_client(stage)
@@ -540,15 +636,50 @@ async def reconcile_open_orders(db: AsyncSession, stage: str) -> list[dict]:
                 continue
 
             # Anything else is a transient lookup problem. Leave the row
-            # unresolved so the next run retries it, rather than guessing.
-            logger.error("Could not reconcile trade %s: %s", trade.id, exc)
+            # unresolved so a later run retries it, rather than guessing —
+            # reading a network blip as "never happened" would lose a real
+            # position. Back off, and escalate once retries are exhausted.
+            state = _reconcile_state(trade)
+            attempts = state.get("attempts", 0) + 1
+            exhausted = attempts >= max_attempts
+
+            delay = backoff_seconds(attempts, backoff_base, backoff_max)
+            _set_reconcile_state(trade, {
+                "attempts": attempts,
+                "last_attempt_at": now.isoformat(),
+                "next_attempt_at": (now + timedelta(seconds=delay)).isoformat(),
+                "last_error": str(exc),
+                "needs_attention": exhausted,
+            })
+
+            if exhausted:
+                logger.error(
+                    "Trade %s could not be reconciled after %d attempts — "
+                    "escalating for manual attention. Last error: %s",
+                    trade.id, attempts, exc,
+                )
+            else:
+                logger.warning(
+                    "Reconcile attempt %d/%d failed for trade %s; retrying in %.0fs: %s",
+                    attempts, max_attempts, trade.id, delay, exc,
+                )
+
             results.append({
                 "trade_id": str(trade.id), "before": before, "after": before,
-                "resolved": False, "detail": f"lookup failed: {exc}",
+                "resolved": False,
+                "attempts": attempts,
+                "needs_attention": exhausted,
+                "retry_in_seconds": None if exhausted else delay,
+                "detail": (
+                    f"escalated after {attempts} failed attempts: {exc}"
+                    if exhausted else f"lookup failed: {exc}"
+                ),
             })
             continue
 
         await _record_response(db, trade, response, float(trade.price or 0.0))
+        if trade.status not in UNRESOLVED_STATUSES:
+            _set_reconcile_state(trade, {"attempts": 0, "resolved_at": now.isoformat()})
         results.append({
             "trade_id": str(trade.id), "before": before, "after": trade.status,
             "resolved": trade.status not in UNRESOLVED_STATUSES,
@@ -556,6 +687,9 @@ async def reconcile_open_orders(db: AsyncSession, stage: str) -> list[dict]:
         })
 
     await db.commit()
+
+    # Escalations must reach the dashboard, not just the log.
+    await refresh_reconciliation_alert(db, stage)
 
     # Balances may have moved while the outcome was unknown.
     if any(r["resolved"] for r in results):
@@ -634,6 +768,7 @@ async def load_trade_records(
             created_at=row.created_at,
             model_id=str(row.model_id) if row.model_id else None,
             fee_usdt=float(row.fee_usdt or 0),
+            stop_price=float(row.stop_price) if row.stop_price is not None else None,
         )
         for row in rows
     ]
