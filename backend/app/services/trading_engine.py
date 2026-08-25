@@ -298,6 +298,47 @@ async def get_lot_step(stage: str, symbol: str) -> float:
 # --------------------------------------------------------------------------
 
 
+async def latest_advisory_context(db: AsyncSession) -> dict | None:
+    """Snapshot of the newest usable advisory, for trades.llm_context (§5.1).
+
+    Read-only and purely for audit: nothing in this function's result is
+    consulted when deciding whether or how to trade. The advisory table is
+    queried directly rather than importing `llm_advisor`, so the dependency
+    only ever runs trading -> advisory data, never the reverse.
+    """
+    from app.db.models import LLMAdvisory
+
+    try:
+        max_age = float(await get_config(db, "llm_advisory_max_age_hours"))
+    except Exception:  # noqa: BLE001
+        max_age = 36.0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age)
+    rows = (
+        await db.execute(
+            select(LLMAdvisory)
+            .where(LLMAdvisory.created_at >= cutoff)
+            .order_by(LLMAdvisory.created_at.desc())
+            .limit(10)
+        )
+    ).scalars().all()
+
+    for row in rows:
+        response = row.response or {}
+        if response.get("status") != "ok":
+            continue
+        return {
+            "advisory_id": row.id,
+            "provider": row.provider,
+            "created_at": row.created_at.isoformat(),
+            "uncertainty": response.get("uncertainty"),
+            "macro_summary": response.get("macro_summary"),
+            "symbols": response.get("symbols"),
+            "key_risks": response.get("key_risks"),
+        }
+    return None
+
+
 async def _submit_order(
     db: AsyncSession,
     proposal: risk_engine.TradeProposal,
@@ -365,6 +406,8 @@ async def _submit_order(
         },
         status=STATUS_SUBMITTED,
         fee_usdt=0,
+        # Audit only — see latest_advisory_context.
+        llm_context=await latest_advisory_context(db),
         # Entry-side: the ATR stop, fixed for this position's life.
         stop_price=stop_price,
         # Exit-side: which of the three rules closed the position.

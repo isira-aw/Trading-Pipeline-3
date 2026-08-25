@@ -203,6 +203,31 @@ export const updateConfig = (key: string, value: unknown) =>
 export const changePin = (current_pin: string, new_pin: string) =>
   apiPost<{ changed: boolean }>("/api/config/pin", { current_pin, new_pin });
 
+export interface Advisory {
+  id: number;
+  provider: string;
+  created_at: string;
+  status: string | null;
+  uncertainty: string | null;
+  uncertainty_reason: string | null;
+  macro_summary: string | null;
+  symbols: Record<string, { view?: string; comment?: string }> | null;
+  key_risks: string[] | null;
+  error: string | null;
+}
+
+export interface AdvisoriesResponse {
+  advisories: Advisory[];
+  calls_today: number;
+  calls_rolling_24h: number;
+  cap: number;
+}
+
+export const getAdvisories = () =>
+  apiGet<AdvisoriesResponse>("/api/advisories?limit=2");
+export const generateAdvisory = () =>
+  apiPost<{ created: boolean; reason: string }>("/api/advisories/generate");
+
 export const getStatus = () => apiGet<SystemStatus>("/api/status");
 export const getTrades = () => apiGet<{ trades: Trade[] }>("/api/trades?limit=25");
 export const getPositions = () => apiGet<{ positions: Position[] }>("/api/positions");

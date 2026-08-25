@@ -73,8 +73,23 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "current_stage": "setup",  # setup | paper | live | halted
 
     # --- LLM advisor (§5.1) ---
+    # Context only. Nothing here places or blocks a trade.
     "llm_calls_per_day": 2,
     "llm_provider": "ollama",  # ollama | gemini
+    "llm_models": {"ollama": "llama3", "gemini": "gemini-1.5-flash"},
+    "llm_timeout_seconds": 60.0,
+    "llm_advisory_hours_utc": [0, 12],
+    # Optional: let an advisory flagging high uncertainty RAISE the risk
+    # engine's confidence floor. OFF by default — it is a real behaviour
+    # change to the entry rules and should be switched on deliberately.
+    "llm_confidence_adjustment_enabled": False,
+    # How much to raise the floor when uncertainty is elevated/high. Only
+    # ever raises: a negative value would loosen the floor from an LLM's
+    # opinion, so the config route refuses one.
+    "llm_uncertainty_confidence_bonus": 0.05,
+    # Advisories older than this are not attached to trades or used for the
+    # floor adjustment — stale macro context is not context.
+    "llm_advisory_max_age_hours": 36,
 
     # --- Model registry scoring (§5.1) ---
     # Weights for the components of a candidate model's score. Precision on

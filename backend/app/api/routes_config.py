@@ -37,13 +37,55 @@ SCHEDULE_KEYS = {
     "reconcile_interval_minutes",
     "retrain_interval_hours",
     "data_refresh_hour_utc",
-    "llm_calls_per_day",
+    "llm_advisory_hours_utc",
 }
 
-# Stage is deliberately not editable here — it moves only through the
-# PIN-gated stage-switch endpoint, so that the promotion gate cannot be
-# sidestepped by writing the config key directly.
+# Not editable through the generic route. The bar for inclusion is narrow:
+# a key belongs here only when writing it directly would bypass a control
+# that exists elsewhere. `current_stage` qualifies because the PIN-gated
+# stage switch and the §5.4 promotion gate are the only sanctioned route
+# from paper to live; a plain PUT would walk straight around both.
+#
+# The LLM keys were reviewed against the same bar and none qualify — see
+# VALUE_CONSTRAINTS. They are context-only settings with no path to order
+# placement, so ordinary editing is right for them; what they need is
+# validation, not protection.
 PROTECTED_KEYS = {"current_stage"}
+
+# Enumerated values. A typo here would otherwise surface much later inside
+# a scheduled job, far from the edit that caused it.
+ALLOWED_VALUES: dict[str, set] = {
+    "llm_provider": {"ollama", "gemini"},
+    "interval": {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"},
+}
+
+# (minimum, maximum) bounds, inclusive. None means unbounded on that side.
+VALUE_CONSTRAINTS: dict[str, tuple[float | None, float | None]] = {
+    # A negative bonus would LOWER the risk engine's confidence floor from
+    # an LLM's opinion, turning a context-only advisory into something that
+    # loosens entry rules. The adjustment may only ever tighten them, so the
+    # value is bounded at zero rather than the key being protected.
+    "llm_uncertainty_confidence_bonus": (0.0, 1.0),
+    "llm_calls_per_day": (0, 50),
+    "llm_timeout_seconds": (1.0, 600.0),
+    "llm_advisory_max_age_hours": (1, 720),
+    # Risk thresholds are operator knobs by design (§8.3) but still bounded,
+    # so a slipped decimal cannot silently disable a limit.
+    "min_confidence": (0.0, 1.0),
+    "max_position_pct": (0.0, 100.0),
+    "max_total_exposure_pct": (0.0, 100.0),
+    "max_daily_loss_pct": (0.0, 100.0),
+    "max_trades_per_day": (0, 1000),
+    "volatility_sigma_limit": (0.5, 20.0),
+    "atr_period": (2, 200),
+    "atr_stop_multiplier": (0.1, 20.0),
+    "min_order_notional_usdt": (0.0, 100000.0),
+    "trade_loop_interval_minutes": (1, 1440),
+    "heartbeat_interval_seconds": (5, 3600),
+    "reconcile_interval_minutes": (1, 1440),
+    "retrain_interval_hours": (1, 8760),
+    "data_refresh_hour_utc": (0, 23),
+}
 
 
 class ConfigValue(BaseModel):
@@ -114,6 +156,25 @@ async def update_config(
                 f"{type(value).__name__}."
             ),
         )
+
+    allowed = ALLOWED_VALUES.get(key)
+    if allowed is not None and value not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} must be one of: {', '.join(sorted(allowed))}.",
+        )
+
+    bounds = VALUE_CONSTRAINTS.get(key)
+    if bounds is not None:
+        low, high = bounds
+        if low is not None and value < low:
+            raise HTTPException(
+                status_code=422, detail=f"{key} must be at least {low}."
+            )
+        if high is not None and value > high:
+            raise HTTPException(
+                status_code=422, detail=f"{key} must be at most {high}."
+            )
 
     await set_config(db, key, value)
     await db.commit()

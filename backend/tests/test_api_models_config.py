@@ -300,3 +300,63 @@ class TestPinChange:
 
     async def test_reports_when_the_pin_is_still_default(self, client):
         assert (await client.get("/api/config")).json()["pin_is_default"] is True
+
+
+class TestLlmConfigProtectionReview:
+    """The LLM keys were reviewed against the PROTECTED_KEYS bar (step 10).
+
+    None qualified: they are context-only settings with no path to order
+    placement, so ordinary editing is right. What they need is validation,
+    which these tests pin down.
+    """
+
+    async def test_llm_keys_are_editable_not_protected(self, client):
+        for key, value in [
+            ("llm_calls_per_day", 3),
+            ("llm_provider", "gemini"),
+            ("llm_confidence_adjustment_enabled", True),
+            ("llm_uncertainty_confidence_bonus", 0.1),
+        ]:
+            response = await client.put(f"/api/config/{key}", json={"value": value})
+            assert response.status_code == 200, f"{key}: {response.json()}"
+
+        # Restore.
+        for key, value in [
+            ("llm_calls_per_day", 2),
+            ("llm_provider", "ollama"),
+            ("llm_confidence_adjustment_enabled", False),
+            ("llm_uncertainty_confidence_bonus", 0.05),
+        ]:
+            await client.put(f"/api/config/{key}", json={"value": value})
+
+    async def test_negative_confidence_bonus_is_refused(self, client):
+        """The one genuine hazard among the LLM keys: a negative bonus would
+        LOWER the risk engine's floor from an LLM's opinion. Bounded at zero
+        rather than protecting the key."""
+        response = await client.put(
+            "/api/config/llm_uncertainty_confidence_bonus", json={"value": -0.2}
+        )
+        assert response.status_code == 422
+        assert "at least 0" in response.json()["detail"]
+
+    async def test_unknown_provider_is_refused(self, client):
+        response = await client.put(
+            "/api/config/llm_provider", json={"value": "gpt-9"}
+        )
+        assert response.status_code == 422
+        assert "ollama" in response.json()["detail"]
+
+    async def test_calls_per_day_is_bounded(self, client):
+        assert (await client.put(
+            "/api/config/llm_calls_per_day", json={"value": 999}
+        )).status_code == 422
+
+    async def test_risk_thresholds_are_bounded_too(self, client):
+        """Editable by design (§8.3), but a slipped decimal must not silently
+        disable a limit."""
+        assert (await client.put(
+            "/api/config/min_confidence", json={"value": 5.0}
+        )).status_code == 422
+        assert (await client.put(
+            "/api/config/max_position_pct", json={"value": -10}
+        )).status_code == 422

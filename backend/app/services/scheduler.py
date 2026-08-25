@@ -30,6 +30,7 @@ from app.db.session import AsyncSessionLocal
 from app.services import trading_engine as te
 from app.services.config_service import get_config
 from app.services.event_bus import (
+    EVENT_ADVISORY,
     EVENT_COMPONENT_STATUS,
     EVENT_SYSTEM,
     EVENT_TRADE,
@@ -37,6 +38,7 @@ from app.services.event_bus import (
     EVENT_WALLET,
     bus,
 )
+from app.services import llm_advisor
 from app.services.model_registry import ModelRegistryError, promote_best_candidate
 from app.services.position_tracker import match_fifo
 from app.services.risk_engine import TradeProposal
@@ -424,6 +426,43 @@ async def retrain_job() -> None:
                 })
 
 
+async def llm_advisory_job() -> None:
+    """Fetch a macro advisory (§5.1).
+
+    Context only: nothing this job produces can place or block a trade. A
+    provider outage is recorded and the cycle skipped — it must never reach
+    APScheduler, which would drop the job permanently (§1.7).
+    """
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await llm_advisor.generate_advisory(db)
+
+            if result.created:
+                await _publish_component(
+                    db, "llm_advisor", "online",
+                    f"Advisory from {result.provider}: "
+                    f"uncertainty={(result.response or {}).get('uncertainty')}",
+                )
+                bus.publish(EVENT_ADVISORY, {
+                    "advisory_id": result.advisory_id,
+                    "provider": result.provider,
+                    "uncertainty": (result.response or {}).get("uncertainty"),
+                })
+            elif "cap" in result.reason.lower():
+                # Not a failure: the cap doing its job.
+                await _publish_component(
+                    db, "llm_advisor", "online", result.reason
+                )
+            else:
+                await _publish_component(
+                    db, "llm_advisor", "error", result.reason
+                )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("LLM advisory job failed")
+            await db.rollback()
+
+
 async def data_refresh_job() -> None:
     """Keep candles current (§5.1)."""
     from app.services.data_downloader import download_historical_data
@@ -452,6 +491,7 @@ async def start_scheduler() -> AsyncIOScheduler:
         reconcile_minutes = await get_config(db, "reconcile_interval_minutes")
         retrain_hours = await get_config(db, "retrain_interval_hours")
         refresh_hour = await get_config(db, "data_refresh_hour_utc")
+        advisory_hours = await get_config(db, "llm_advisory_hours_utc")
 
     scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -477,6 +517,11 @@ async def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(
         data_refresh_job, CronTrigger(hour=refresh_hour, minute=0),
         id="data_refresh", replace_existing=True, max_instances=1,
+    )
+    scheduler.add_job(
+        llm_advisory_job,
+        CronTrigger(hour=",".join(str(h) for h in advisory_hours), minute=5),
+        id="llm_advisory", replace_existing=True, max_instances=1, coalesce=True,
     )
 
     scheduler.start()
@@ -529,6 +574,7 @@ async def reschedule_jobs() -> bool:
         reconcile_minutes = await get_config(db, "reconcile_interval_minutes")
         retrain_hours = await get_config(db, "retrain_interval_hours")
         refresh_hour = await get_config(db, "data_refresh_hour_utc")
+        advisory_hours = await get_config(db, "llm_advisory_hours_utc")
 
     scheduler.reschedule_job("trade_loop", trigger=IntervalTrigger(minutes=trade_minutes))
     scheduler.reschedule_job("heartbeat", trigger=IntervalTrigger(seconds=heartbeat_seconds))
@@ -536,6 +582,10 @@ async def reschedule_jobs() -> bool:
     scheduler.reschedule_job("retrain", trigger=IntervalTrigger(hours=retrain_hours))
     scheduler.reschedule_job(
         "data_refresh", trigger=CronTrigger(hour=refresh_hour, minute=0)
+    )
+    scheduler.reschedule_job(
+        "llm_advisory",
+        trigger=CronTrigger(hour=",".join(str(h) for h in advisory_hours), minute=5),
     )
 
     logger.info(

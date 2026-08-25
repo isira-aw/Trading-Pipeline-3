@@ -540,12 +540,84 @@ LIMIT_KEYS = (
     "required_healthy_components",
     "volatility_lookback_candles",
     "max_pnl_baseline_age_hours",
+    "llm_confidence_adjustment_enabled",
+    "llm_uncertainty_confidence_bonus",
+    "llm_advisory_max_age_hours",
 )
+
+# Advisory uncertainty levels that trigger a floor increase, when enabled.
+UNCERTAIN_LEVELS = ("elevated", "high")
 
 
 async def load_limits(db: AsyncSession) -> dict:
-    """Read every risk threshold from the config table (§1.1)."""
-    return {key: await get_config(db, key) for key in LIMIT_KEYS}
+    """Read every risk threshold from the config table (§1.1).
+
+    Optionally raises the confidence floor when the latest LLM advisory
+    flags an uncertain environment (§5.1). Disabled by default, and applied
+    here in the I/O layer rather than inside a rule, so the pure rules stay
+    a function of `limits` alone and remain testable without any of this.
+
+    The adjustment can only ever *raise* the floor. The advisory is context;
+    letting it lower a risk threshold would make an LLM's opinion able to
+    approve trades the configured rules would have rejected.
+    """
+    limits = {key: await get_config(db, key) for key in LIMIT_KEYS}
+    limits["llm_floor_adjustment"] = None
+
+    if not limits.get("llm_confidence_adjustment_enabled"):
+        return limits
+
+    advisory = await _latest_uncertainty(db, limits["llm_advisory_max_age_hours"])
+    if advisory is None:
+        return limits
+
+    level, advisory_id = advisory
+    if level not in UNCERTAIN_LEVELS:
+        return limits
+
+    bonus = max(0.0, float(limits.get("llm_uncertainty_confidence_bonus") or 0.0))
+    original = float(limits["min_confidence"])
+    raised = min(1.0, original + bonus)
+
+    limits["min_confidence"] = raised
+    limits["llm_floor_adjustment"] = {
+        "advisory_id": advisory_id,
+        "uncertainty": level,
+        "original_min_confidence": original,
+        "adjusted_min_confidence": raised,
+    }
+    logger.info(
+        "LLM advisory %s reports %s uncertainty; confidence floor raised "
+        "%.4f -> %.4f.", advisory_id, level, original, raised,
+    )
+    return limits
+
+
+async def _latest_uncertainty(
+    db: AsyncSession, max_age_hours: float
+) -> tuple[str, int] | None:
+    """Uncertainty level from the newest usable advisory within max age.
+
+    Reads the table directly rather than importing `llm_advisor`, keeping
+    the dependency one-directional.
+    """
+    from app.db.models import LLMAdvisory
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=float(max_age_hours))
+    rows = (
+        await db.execute(
+            select(LLMAdvisory)
+            .where(LLMAdvisory.created_at >= cutoff)
+            .order_by(LLMAdvisory.created_at.desc())
+            .limit(10)
+        )
+    ).scalars().all()
+
+    for row in rows:
+        response = row.response or {}
+        if response.get("status") == "ok" and response.get("uncertainty"):
+            return str(response["uncertainty"]).lower(), int(row.id)
+    return None
 
 
 async def get_daily_pnl(

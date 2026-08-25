@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import AdvisoryPanel from "@/app/components/AdvisoryPanel";
 import NavBar from "@/app/components/NavBar";
 import PositionsTable from "@/app/components/PositionsTable";
 import StatusStrip from "@/app/components/StatusStrip";
@@ -23,12 +24,15 @@ import WalletPanel from "@/app/components/WalletPanel";
 import {
   downloadData,
   emergencyStop,
+  generateAdvisory,
+  getAdvisories,
   getPositions,
   getStatus,
   getTrades,
   getWallet,
   startSystem,
   stopSystem,
+  type AdvisoriesResponse,
   type Position,
   type SystemStatus,
   type Trade,
@@ -54,6 +58,8 @@ export default function Dashboard() {
   const [positionsError, setPositionsError] = useState<string | null>(null);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [walletError, setWalletError] = useState<string | null>(null);
+  const [advisories, setAdvisories] = useState<AdvisoriesResponse | null>(null);
+  const [advisoriesError, setAdvisoriesError] = useState<string | null>(null);
   const [wsState, setWsState] = useState<ConnectionState>("connecting");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -98,19 +104,30 @@ export default function Dashboard() {
     }
   }, []);
 
+  const refreshAdvisories = useCallback(async () => {
+    const result = await getAdvisories();
+    if (result.ok) {
+      setAdvisories(result.data);
+      setAdvisoriesError(null);
+    } else {
+      setAdvisoriesError(result.error);
+    }
+  }, []);
+
   const refreshAll = useCallback(async () => {
     await Promise.all([
       refreshStatus(),
       refreshTrades(),
       refreshPositions(),
       refreshWallet(),
+      refreshAdvisories(),
     ]);
-  }, [refreshStatus, refreshTrades, refreshPositions, refreshWallet]);
+  }, [refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories]);
 
   // Keep the latest refreshers reachable from the WebSocket callback without
   // tearing down and rebuilding the socket on every render.
-  const handlers = useRef({ refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet });
-  handlers.current = { refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet };
+  const handlers = useRef({ refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories });
+  handlers.current = { refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories };
 
   useEffect(() => {
     void refreshAll();
@@ -132,6 +149,9 @@ export default function Dashboard() {
             break;
           case "component_status_change":
             void handlers.current.refreshStatus();
+            break;
+          case "llm_advisory":
+            void handlers.current.refreshAdvisories();
             break;
           case "training_progress": {
             const symbol = String(event.symbol ?? "");
@@ -268,6 +288,13 @@ export default function Dashboard() {
             Stop
           </button>
           <button
+            onClick={() => void runAction(generateAdvisory, "LLM advisory")}
+            disabled={busy}
+            className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          >
+            Get Advisory
+          </button>
+          <button
             onClick={() => void runAction(downloadData, "Data download")}
             disabled={busy}
             className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
@@ -296,7 +323,12 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <TradesFeed trades={trades} error={tradesError} />
+        <div className="grid gap-4 lg:grid-cols-3">
+          <AdvisoryPanel data={advisories} error={advisoriesError} />
+          <div className="lg:col-span-2">
+            <TradesFeed trades={trades} error={tradesError} />
+          </div>
+        </div>
 
         <footer className="pt-2 text-xs text-zinc-500">
           {status?.scheduler_running

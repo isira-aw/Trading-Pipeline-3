@@ -27,6 +27,7 @@ EVENT_COMPONENT_STATUS = "component_status_change"
 EVENT_DATA_DOWNLOAD = "data_download_progress"
 EVENT_WALLET = "wallet_update"
 EVENT_SYSTEM = "system_event"
+EVENT_ADVISORY = "llm_advisory"
 
 # Per-subscriber buffer. Enough to ride out a brief stall; small enough that
 # a tab left open in the background cannot grow memory without bound.
