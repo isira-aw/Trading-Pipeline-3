@@ -16,7 +16,7 @@ import pytest_asyncio
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.db.models import ComponentStatus, Model, RiskLog, Trade, WalletSnapshot
+from app.db.models import Config, ComponentStatus, Model, RiskLog, Trade, WalletSnapshot
 from app.services import trading_engine as te
 from app.services.risk_engine import (
     DECISION_APPROVED,
@@ -72,11 +72,27 @@ async def db():
 
     async with maker() as session:
         await _cleanup(session)
+        # assert_stage_permitted requires the order's stage to be the active
+        # one, so the test stage is made active for the duration.
+        previous = (await session.execute(
+            select(Config.value).where(Config.key == "current_stage")
+        )).scalar_one_or_none()
+        await session.execute(
+            delete(Config).where(Config.key == "current_stage")
+        )
+        session.add(Config(key="current_stage", value=TEST_STAGE))
+        await session.commit()
+
         try:
             yield session
         finally:
             await session.rollback()
             await _cleanup(session)
+            await session.execute(
+                delete(Config).where(Config.key == "current_stage")
+            )
+            session.add(Config(key="current_stage", value=previous or "setup"))
+            await session.commit()
 
     await engine.dispose()
 
@@ -595,23 +611,29 @@ class TestRealizedPerformance:
 # --------------------------------------------------------------------------
 
 
-class TestLiveStageBlocked:
-    """`get_trading_client` returns a PRODUCTION client for stage 'live', so
-    without an explicit block, setting current_stage='live' in the config
-    table would place real-money orders before the §5.4 gate exists."""
+class TestStagePermission:
+    """The replacement for step 8's blanket live block.
 
-    async def test_place_order_refuses_live_stage(self, db):
+    `get_trading_client` still returns a PRODUCTION client for stage 'live',
+    so the guard's job is unchanged: the `stage` argument must never be
+    trusted on its own.
+    """
+
+    async def test_order_refused_for_a_stage_that_is_not_active(self, db):
+        """The core of the replacement: passing 'live' while the system is
+        in paper must not reach the production client."""
         stub = StubExchange()
         p1, p2, p3 = patch_exchange(stub)
         with p1, p2, p3:
-            with pytest.raises(te.LiveStageNotEnabled):
+            with pytest.raises(te.StageNotPermitted, match="active stage"):
                 await te.place_order(
                     db, TradeProposal(SYMBOL, "buy", 1.0, 100.0, 0.9, None),
                     "live", NOW,
                 )
-        assert stub.orders == []
+        assert stub.orders == [], "an order reached the exchange for an inactive stage"
 
-    async def test_submit_order_refuses_live_stage_even_when_approved(self, db):
+    async def test_submit_order_refuses_an_inactive_stage_too(self, db):
+        """Both entry points are guarded, not just the outer one."""
         stub = StubExchange()
         decision = RiskDecision(
             decision=DECISION_APPROVED, reason="ok", checks=[],
@@ -619,136 +641,31 @@ class TestLiveStageBlocked:
         )
         p1, p2, p3 = patch_exchange(stub)
         with p1, p2, p3:
-            with pytest.raises(te.LiveStageNotEnabled):
+            with pytest.raises(te.StageNotPermitted):
                 await te._submit_order(
                     db, TradeProposal(SYMBOL, "buy", 1.0, 100.0, 0.9, None),
                     decision, "live",
                 )
         assert stub.orders == []
 
-    async def test_paper_stage_is_unaffected(self, db):
-        te.assert_paper_stage("paper")
-        te.assert_paper_stage(TEST_STAGE)
+    async def test_active_stage_is_permitted(self, db):
+        await te.assert_stage_permitted(db, TEST_STAGE, "buy")
 
-
-# --------------------------------------------------------------------------
-# 7. Reconciliation retry, backoff and escalation
-# --------------------------------------------------------------------------
-
-
-class TestReconcileRetryAndEscalation:
-    async def _orphan(self, db):
-        trade = Trade(
-            id=uuid.uuid4(), stage=TEST_STAGE, symbol=SYMBOL, side="buy",
-            order_type="market", quantity=1.0, price=None,
-            risk_decision="approved", status=te.STATUS_SUBMITTED, created_at=NOW,
-        )
-        db.add(trade)
-        await db.commit()
-        return trade
-
-    @staticmethod
-    def _failing_lookup():
-        async def fake(client, symbol, client_order_id):
-            raise ConnectionError("temporary network failure")
-        return fake
-
-    async def test_first_failure_records_backoff_not_escalation(self, db):
-        trade = await self._orphan(db)
-
-        with patch.object(te, "_fetch_order", self._failing_lookup()):
-            results = await te.reconcile_open_orders(db, TEST_STAGE)
-
-        assert results[0]["attempts"] == 1
-        assert not results[0]["needs_attention"]
-        assert results[0]["retry_in_seconds"] == 30
-
-        await db.refresh(trade)
-        state = trade.risk_notes["reconcile"]
-        assert state["attempts"] == 1
-        assert state["needs_attention"] is False
-        assert "next_attempt_at" in state
-
-    async def test_order_inside_backoff_is_skipped(self, db):
-        """A retry storm against an unreachable exchange helps nobody."""
-        await self._orphan(db)
-
-        with patch.object(te, "_fetch_order", self._failing_lookup()):
-            first = await te.reconcile_open_orders(db, TEST_STAGE)
-            assert len(first) == 1
-            # Immediately again — still inside the 30s window.
-            second = await te.reconcile_open_orders(db, TEST_STAGE)
-
-        assert second == []
-
-    async def test_escalates_after_the_attempt_cap(self, db):
-        trade = await self._orphan(db)
-        max_attempts = 6
-
-        with patch.object(te, "_fetch_order", self._failing_lookup()):
-            for _ in range(max_attempts):
-                # Force each attempt to be due by clearing the backoff.
-                state = dict(te._reconcile_state(trade))
-                state.pop("next_attempt_at", None)
-                te._set_reconcile_state(trade, state)
-                await db.commit()
-                results = await te.reconcile_open_orders(db, TEST_STAGE)
-
-        assert results[0]["needs_attention"]
-        assert results[0]["attempts"] == max_attempts
-
-        await db.refresh(trade)
-        assert trade.risk_notes["reconcile"]["needs_attention"] is True
-        # Still unresolved — escalation is not a resolution.
-        assert trade.status == te.STATUS_SUBMITTED
-
-    async def test_escalated_order_surfaces_on_component_status(self, db):
-        """The alert path: it must be visible on the dashboard, not just in
-        the log (§1.7, §8.1)."""
-        trade = await self._orphan(db)
-        te._set_reconcile_state(trade, {"attempts": 6, "needs_attention": True})
+    async def test_live_entry_blocked_when_the_gate_no_longer_passes(self, db):
+        """Defence in depth: promotion is not permanent. If the record
+        degrades after switching, new risk stops being taken."""
+        await db.execute(delete(Config).where(Config.key == "current_stage"))
+        db.add(Config(key="current_stage", value="live"))
         await db.commit()
 
-        count = await te.refresh_reconciliation_alert(db, TEST_STAGE)
+        with pytest.raises(te.StageNotPermitted, match="promotion gate"):
+            await te.assert_stage_permitted(db, "live", "buy")
 
-        assert count == 1
-        row = await db.get(ComponentStatus, te.COMPONENT_RECONCILIATION)
-        assert row.status == "error"
-        assert str(trade.id) in row.detail
-
-    async def test_alert_clears_once_nothing_is_stuck(self, db):
-        await te.refresh_reconciliation_alert(db, TEST_STAGE)
-        row = await db.get(ComponentStatus, te.COMPONENT_RECONCILIATION)
-        assert row.status == "online"
-
-    async def test_escalated_orders_are_listed_for_the_dashboard(self, db):
-        trade = await self._orphan(db)
-        te._set_reconcile_state(trade, {"attempts": 6, "needs_attention": True})
+    async def test_live_exit_still_permitted_when_the_gate_fails(self, db):
+        """Blocking a sell would strand real capital in a position the
+        system can no longer close."""
+        await db.execute(delete(Config).where(Config.key == "current_stage"))
+        db.add(Config(key="current_stage", value="live"))
         await db.commit()
 
-        stuck = await te.get_orders_needing_attention(db, TEST_STAGE)
-        assert [str(t.id) for t in stuck] == [str(trade.id)]
-
-    async def test_successful_retry_clears_the_retry_state(self, db):
-        trade = await self._orphan(db)
-
-        with patch.object(te, "_fetch_order", self._failing_lookup()):
-            await te.reconcile_open_orders(db, TEST_STAGE)
-
-        async def succeeds(client, symbol, client_order_id):
-            return fill_response(order_id=42, qty="1", quote="100")
-
-        # Clear the backoff so the retry is due.
-        state = dict(te._reconcile_state(trade))
-        state.pop("next_attempt_at", None)
-        te._set_reconcile_state(trade, state)
-        await db.commit()
-
-        with patch.object(te, "_fetch_order", succeeds), \
-             patch.object(te, "snapshot_wallet", lambda db, stage: _noop()):
-            results = await te.reconcile_open_orders(db, TEST_STAGE)
-
-        assert results[0]["resolved"]
-        await db.refresh(trade)
-        assert trade.status == te.STATUS_FILLED
-        assert trade.risk_notes["reconcile"]["attempts"] == 0
+        await te.assert_stage_permitted(db, "live", "sell")

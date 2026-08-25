@@ -228,6 +228,35 @@ export const getAdvisories = () =>
 export const generateAdvisory = () =>
   apiPost<{ created: boolean; reason: string }>("/api/advisories/generate");
 
+export interface GateCriterion {
+  name: string;
+  label: string;
+  passed: boolean;
+  current: number | null;
+  required: number;
+  comparison: string;
+  detail: string;
+}
+
+export interface GateStatus {
+  passed: boolean;
+  criteria: GateCriterion[];
+  stats: Record<string, number | null>;
+  thresholds: Record<string, number>;
+  summary: string;
+  current_stage: string;
+  can_switch_to_live: boolean;
+  pin_is_default: boolean;
+  pin_warning: { level: string; message: string } | null;
+}
+
+export const getGate = () => apiGet<GateStatus>("/api/stage/gate");
+export const switchStage = (stage: string, pin: string) =>
+  apiPost<{ switched: boolean; to: string; pin_warning: { message: string } | null }>(
+    "/api/stage/switch",
+    { stage, pin },
+  );
+
 export const getStatus = () => apiGet<SystemStatus>("/api/status");
 export const getTrades = () => apiGet<{ trades: Trade[] }>("/api/trades?limit=25");
 export const getPositions = () => apiGet<{ positions: Position[] }>("/api/positions");

@@ -107,6 +107,10 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "min_trades_for_realized_score": 20,
 
     # --- Promotion gate (§5.4) ---
+    # PIN-gated: see routes_config.PROTECTED_KEYS. Editable only through
+    # PUT /api/stage/gate, because loosening a threshold is the same
+    # decision as switching stages, reached by another route.
+    "promotion_gate_changed_at": "",
     "promotion_gate": {
         "min_paper_trading_days": 30,
         "min_trade_count": 40,

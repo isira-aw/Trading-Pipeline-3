@@ -7,15 +7,19 @@
  * their next run, so changes take effect without a restart. Schedule
  * intervals additionally rebuild the scheduler's triggers server-side.
  *
- * The stage switch is deliberately rendered as a disabled placeholder: the
- * §5.4 promotion gate does not exist yet, so a working-looking control here
- * would either do nothing or move to live with nothing checking whether
- * that is safe. It becomes real in step 12.
+ * The stage switch is now the real control (StageSwitch), showing live gate
+ * status per criterion and taking the PIN. Its disabled state is UX only —
+ * POST /api/stage/switch re-checks both the PIN and the gate server-side.
+ *
+ * `promotion_gate` is deliberately absent from the editors below: it is
+ * PIN-gated via PUT /api/stage/gate, because loosening a threshold is the
+ * same decision as switching stages reached by another route.
  */
 
 import { useCallback, useEffect, useState } from "react";
 
 import NavBar from "@/app/components/NavBar";
+import StageSwitch from "@/app/components/StageSwitch";
 import {
   changePin,
   getConfig,
@@ -80,13 +84,6 @@ const GROUPS: { title: string; note?: string; fields: FieldSpec[] }[] = [
       { key: "heartbeat_interval_seconds", label: "Heartbeat (seconds)", type: "number" },
       { key: "reconcile_interval_minutes", label: "Reconcile (minutes)", type: "number" },
       { key: "data_refresh_hour_utc", label: "Data refresh hour (UTC)", type: "number" },
-    ],
-  },
-  {
-    title: "Promotion gate (§5.4)",
-    note: "Thresholds a paper record must meet before live trading is possible.",
-    fields: [
-      { key: "promotion_gate", label: "Gate thresholds (JSON)", type: "text" },
     ],
   },
 ];
@@ -238,26 +235,8 @@ export default function SettingsPage() {
 
         <PinPanel onDone={(message) => setNotice(message)} />
 
-        {/* Stage switch — deliberately not functional yet. */}
-        <section className="rounded-lg border border-dashed border-zinc-300 bg-white p-4 opacity-70 dark:border-zinc-700 dark:bg-zinc-900">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">
-            Stage switch
-          </h2>
-          <p className="mt-1 text-xs text-zinc-500">
-            Not available yet. The §5.4 promotion gate that decides whether
-            paper trading has earned live access has not been built, so there
-            is nothing here that could check the switch is safe. A control
-            that looked clickable would be worse than none.
-          </p>
-          <button
-            disabled
-            aria-disabled="true"
-            title="Unavailable until the promotion gate exists (step 12)"
-            className="mt-3 cursor-not-allowed rounded-md bg-zinc-400 px-4 py-2 text-sm font-semibold text-white dark:bg-zinc-700"
-          >
-            Switch to live — unavailable
-          </button>
-        </section>
+        <StageSwitch onChanged={() => void refresh()} />
+
       </div>
     </div>
   );

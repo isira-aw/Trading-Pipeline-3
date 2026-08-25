@@ -80,10 +80,6 @@ async def trading_allowed(db) -> tuple[bool, str]:
         return False, "Trading is halted (emergency stop active)."
     if stage == STAGE_SETUP:
         return False, "Stage is 'setup'; switch to paper to begin trading."
-    if stage == te.STAGE_LIVE:
-        return False, (
-            "Live stage is not enabled: the promotion gate is not implemented."
-        )
     if not await get_config(db, "trading_enabled"):
         return False, "Trading is stopped (start it from the dashboard)."
 
@@ -169,7 +165,7 @@ async def reconcile_job() -> None:
     async with AsyncSessionLocal() as db:
         try:
             stage = await get_config(db, "current_stage")
-            if stage in (STAGE_SETUP, te.STAGE_LIVE):
+            if stage == STAGE_SETUP:
                 return
             results = await te.reconcile_open_orders(db, stage)
             for result in results:
@@ -543,7 +539,7 @@ async def run_startup_reconciliation() -> None:
     async with AsyncSessionLocal() as db:
         try:
             stage = await get_config(db, "current_stage")
-            if stage in (STAGE_SETUP, te.STAGE_LIVE):
+            if stage == STAGE_SETUP:
                 return
             results = await te.reconcile_open_orders(db, stage)
             if results:

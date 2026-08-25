@@ -79,23 +79,69 @@ class TradingEngineError(RuntimeError):
     """An order could not be placed or reconciled."""
 
 
-class LiveStageNotEnabled(TradingEngineError):
-    """Refused to trade real money before the promotion gate exists.
+class StageNotPermitted(TradingEngineError):
+    """Refused to place an order for a stage that is not actually active.
 
-    `get_trading_client` returns a production client for stage 'live', so
-    without this guard setting current_stage='live' in the config table
-    would place real orders immediately — bypassing the §5.4 gate that is
-    supposed to be the only route there. Until step 12 implements that gate,
-    live is blocked outright rather than merely undocumented.
+    `get_trading_client` returns a PRODUCTION client for stage 'live', so
+    the `stage` argument threaded through this module decides whether real
+    money moves. This is the guard that stops that argument being trusted
+    on its own.
+
+    It replaces step 8's blanket `assert_paper_stage`, which refused live
+    outright while no promotion gate existed. The gate exists now, but
+    removing the old block without a replacement would leave the window
+    unguarded, so the check became narrower rather than absent: an order
+    may only be placed for the stage the config table says is currently
+    active, and a live *entry* additionally requires the §5.4 gate to still
+    pass.
     """
 
 
-def assert_paper_stage(stage: str) -> None:
-    """Refuse any live-stage order. Removed in step 12, not before."""
-    if stage == STAGE_LIVE:
-        raise LiveStageNotEnabled(
-            "Live trading is not enabled: the §5.4 promotion gate has not "
-            "been implemented yet. Paper (testnet) trading only."
+# Backwards-compatible alias: step 8's name, now backed by the real check.
+LiveStageNotEnabled = StageNotPermitted
+
+
+async def assert_stage_permitted(
+    db: AsyncSession, stage: str, side: str | None = None
+) -> None:
+    """Verify an order may be placed for this stage (§5.3, §5.4).
+
+    Two conditions:
+
+    1. `stage` must match `current_stage` in config. A caller cannot reach
+       the production client by passing 'live' while the system is in
+       paper — the switch endpoint, with its PIN and gate, is the only way
+       `current_stage` becomes 'live'.
+    2. For live *entries*, the promotion gate must still pass. This is
+       defence in depth: if the record degrades after promotion, new risk
+       stops being taken.
+
+    Exits are deliberately exempt from the second condition. Blocking a
+    sell because the gate slipped would strand real capital in a position
+    the system can no longer close, which is the same reasoning that keeps
+    sells exempt from the risk engine's entry rules.
+    """
+    current = await get_config(db, "current_stage")
+
+    if stage != current:
+        raise StageNotPermitted(
+            f"Refusing an order for stage {stage!r} while the active stage "
+            f"is {current!r}. Stage changes go through the PIN-gated switch."
+        )
+
+    if stage != STAGE_LIVE:
+        return
+
+    if side == "sell":
+        return
+
+    from app.services.promotion_gate import evaluate_gate
+
+    result = await evaluate_gate(db)
+    if not result.passed:
+        raise StageNotPermitted(
+            f"Live entries are blocked: the promotion gate no longer passes "
+            f"({result.summary()}). Exits remain permitted."
         )
 
 
@@ -354,7 +400,7 @@ async def _submit_order(
     `RiskDecision` that approved it and refuses anything else, so there is
     no path to the exchange that bypasses the risk engine.
     """
-    assert_paper_stage(stage)
+    await assert_stage_permitted(db, stage, proposal.side)
 
     if not decision.approved:
         raise RiskApprovalMissing(
@@ -508,7 +554,7 @@ async def place_order(
     This is the entry point the trade loop uses. Rejections are logged to
     risk_log by `assess` and return without touching the exchange.
     """
-    assert_paper_stage(stage)
+    await assert_stage_permitted(db, stage, proposal.side)
 
     try:
         state = await get_account_state(db, stage)

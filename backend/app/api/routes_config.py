@@ -46,11 +46,19 @@ SCHEDULE_KEYS = {
 # stage switch and the §5.4 promotion gate are the only sanctioned route
 # from paper to live; a plain PUT would walk straight around both.
 #
+# `promotion_gate` qualifies for the same reason, and it is the sharper
+# case: the gate is only as strong as its thresholds, so setting
+# min_win_rate to 0 and min_trade_count to 1 makes an untested system pass
+# instantly. Editing a threshold is therefore exactly as powerful as
+# switching stages, and takes the same credential — PUT /api/stage/gate
+# with the PIN. §8.3 still gets its editor; it just goes through the door
+# with the lock on it.
+#
 # The LLM keys were reviewed against the same bar and none qualify — see
 # VALUE_CONSTRAINTS. They are context-only settings with no path to order
 # placement, so ordinary editing is right for them; what they need is
 # validation, not protection.
-PROTECTED_KEYS = {"current_stage"}
+PROTECTED_KEYS = {"current_stage", "promotion_gate", "promotion_gate_changed_at"}
 
 # Enumerated values. A typo here would otherwise surface much later inside
 # a scheduled job, far from the edit that caused it.
@@ -133,7 +141,8 @@ async def update_config(
             status_code=403,
             detail=(
                 f"{key} is not editable here; it changes only through the "
-                f"PIN-gated stage switch."
+                f"PIN-gated stage endpoints (POST /api/stage/switch, "
+                f"PUT /api/stage/gate)."
             ),
         )
     if key not in CONFIG_DEFAULTS:
