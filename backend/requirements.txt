@@ -16,3 +16,7 @@ pydantic
 pydantic-settings
 ollama
 google-generativeai
+
+# Testing
+pytest
+pytest-asyncio
