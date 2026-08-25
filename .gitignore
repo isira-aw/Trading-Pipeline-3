@@ -74,3 +74,6 @@ frontend/.env.production.local
 # Models Store
 backend/models_store/*
 !backend/models_store/.gitkeep
+
+# Trained model binaries (§2) — data lives in Postgres, not Git
+backend/app/models_store/
