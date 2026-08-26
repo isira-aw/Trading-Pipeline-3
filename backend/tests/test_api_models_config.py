@@ -19,14 +19,10 @@ from app.db.models import Config, Model
 from app.services.security import DEFAULT_PIN, hash_pin, verify_pin
 
 SYMBOL = "APITESTUSDT"
-DB_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/trading_pipeline",
-)
 
 
-async def _db_reachable() -> bool:
-    engine = create_async_engine(DB_URL)
+async def _db_reachable(db_url) -> bool:
+    engine = create_async_engine(db_url)
     try:
         async with engine.connect():
             return True
@@ -37,21 +33,38 @@ async def _db_reachable() -> bool:
 
 
 @pytest_asyncio.fixture
-async def client():
-    if not await _db_reachable():
-        pytest.skip(f"No database reachable at {DB_URL}")
+async def client(test_database_url):
+    if not await _db_reachable(test_database_url):
+        pytest.skip(f"No database reachable at {test_database_url}")
 
     from app.main import app
+    from app.db.session import get_db
+
+    # Routes resolve `db` via this dependency, which is bound at import time
+    # to the dev DATABASE_URL — override it so requests through this client
+    # hit the disposable test database, not dev/paper data.
+    engine = create_async_engine(test_database_url)
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _override_get_db():
+        async with maker() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_get_db
 
     # The lifespan starts the scheduler; not wanted in tests.
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        await engine.dispose()
 
 
 @pytest_asyncio.fixture
-async def db():
-    engine = create_async_engine(DB_URL)
+async def db(test_database_url):
+    engine = create_async_engine(test_database_url)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with maker() as session:
         await session.execute(delete(Model).where(Model.symbol == SYMBOL))

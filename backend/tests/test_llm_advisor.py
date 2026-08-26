@@ -23,10 +23,6 @@ from app.db.models import Config, LLMAdvisory
 from app.services import llm_advisor as advisor
 
 NOW = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
-DB_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/trading_pipeline",
-)
 
 SERVICES = Path(__file__).resolve().parents[1] / "app" / "services"
 
@@ -219,8 +215,8 @@ class TestProviderSelection:
 # --------------------------------------------------------------------------
 
 
-async def _db_reachable() -> bool:
-    engine = create_async_engine(DB_URL)
+async def _db_reachable(db_url) -> bool:
+    engine = create_async_engine(db_url)
     try:
         async with engine.connect():
             return True
@@ -231,11 +227,11 @@ async def _db_reachable() -> bool:
 
 
 @pytest_asyncio.fixture
-async def db():
-    if not await _db_reachable():
-        pytest.skip(f"No database reachable at {DB_URL}")
+async def db(test_database_url):
+    if not await _db_reachable(test_database_url):
+        pytest.skip(f"No database reachable at {test_database_url}")
 
-    engine = create_async_engine(DB_URL)
+    engine = create_async_engine(test_database_url)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with maker() as session:
         await session.execute(delete(LLMAdvisory))
@@ -293,14 +289,14 @@ class TestDailyCap:
 
         assert not manual.created
 
-    async def test_reservation_is_written_before_the_provider_is_called(self, db):
+    async def test_reservation_is_written_before_the_provider_is_called(self, db, test_database_url):
         """Why the cap holds under a race: the slot exists on disk before the
         call, so a concurrent caller counting rows already sees it."""
         await _set(db, "llm_calls_per_day", 5)
         seen = {}
 
         async def inspect(prompt, preferred, models, timeout):
-            engine = create_async_engine(DB_URL)
+            engine = create_async_engine(test_database_url)
             maker = async_sessionmaker(engine, class_=AsyncSession)
             async with maker() as other:
                 rows = (await other.execute(select(LLMAdvisory))).scalars().all()

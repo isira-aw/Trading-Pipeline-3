@@ -6,7 +6,6 @@ written, what is refused, what happens after a crash), not Binance's.
 Skipped when no database is reachable.
 """
 
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -32,14 +31,8 @@ SYMBOL = "TEUSDT"
 NOW = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
 START_OF_DAY = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
 
-DB_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/trading_pipeline",
-)
-
-
-async def _db_reachable() -> bool:
-    engine = create_async_engine(DB_URL)
+async def _db_reachable(db_url) -> bool:
+    engine = create_async_engine(db_url)
     try:
         async with engine.connect():
             return True
@@ -63,11 +56,11 @@ async def _cleanup(session):
 
 
 @pytest_asyncio.fixture
-async def db():
-    if not await _db_reachable():
-        pytest.skip(f"No database reachable at {DB_URL}")
+async def db(test_database_url):
+    if not await _db_reachable(test_database_url):
+        pytest.skip(f"No database reachable at {test_database_url}")
 
-    engine = create_async_engine(DB_URL)
+    engine = create_async_engine(test_database_url)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with maker() as session:
@@ -261,14 +254,14 @@ class TestReconciliation:
         await db.commit()
         return trade
 
-    async def test_write_ahead_row_exists_before_the_exchange_call(self, db):
+    async def test_write_ahead_row_exists_before_the_exchange_call(self, db, test_database_url):
         """The crash-safety precondition: if the process dies during the
         exchange call, a row must already be on disk to reconcile."""
         seen = {}
 
         async def crash(client, symbol, side, quantity, client_order_id):
             # Read from a *separate* session to prove the row was committed.
-            engine = create_async_engine(DB_URL)
+            engine = create_async_engine(test_database_url)
             maker = async_sessionmaker(engine, class_=AsyncSession)
             async with maker() as other:
                 rows = (await other.execute(

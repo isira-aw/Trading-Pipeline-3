@@ -8,7 +8,6 @@ database. Skipped when no database is reachable, matching the other `_db`
 test modules.
 """
 
-import os
 from unittest.mock import patch
 
 import pytest
@@ -24,14 +23,8 @@ from app.services.event_bus import EVENT_DATA_DOWNLOAD, bus
 SYMBOLS = ["TDAUSDT", "TDBUSDT"]
 INTERVAL = "4h"
 
-DB_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/trading_pipeline",
-)
-
-
-async def _db_reachable() -> bool:
-    engine = create_async_engine(DB_URL)
+async def _db_reachable(db_url) -> bool:
+    engine = create_async_engine(db_url)
     try:
         async with engine.connect():
             return True
@@ -48,20 +41,25 @@ async def _cleanup(session):
 
 
 @pytest_asyncio.fixture
-async def db():
-    if not await _db_reachable():
-        pytest.skip(f"No database reachable at {DB_URL}")
+async def db(test_database_url):
+    if not await _db_reachable(test_database_url):
+        pytest.skip(f"No database reachable at {test_database_url}")
 
-    engine = create_async_engine(DB_URL)
+    engine = create_async_engine(test_database_url)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async with maker() as session:
-        await _cleanup(session)
-        try:
-            yield session
-        finally:
-            await session.rollback()
+    # download_historical_data opens its own session via the module-level
+    # AsyncSessionLocal (bound to dev DATABASE_URL), independent of the `db`
+    # session below — patch it so the function under test writes to the same
+    # disposable database this fixture asserts against.
+    with patch.object(dd, "AsyncSessionLocal", maker):
+        async with maker() as session:
             await _cleanup(session)
+            try:
+                yield session
+            finally:
+                await session.rollback()
+                await _cleanup(session)
 
 
 def fake_klines(count=3):

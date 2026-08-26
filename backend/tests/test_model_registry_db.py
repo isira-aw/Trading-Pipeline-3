@@ -32,14 +32,9 @@ from app.services.model_registry import (
 
 TEST_SYMBOL = "REGTESTUSDT"
 
-DB_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/trading_pipeline",
-)
 
-
-async def _db_reachable() -> bool:
-    engine = create_async_engine(DB_URL)
+async def _db_reachable(db_url) -> bool:
+    engine = create_async_engine(db_url)
     try:
         async with engine.connect():
             return True
@@ -50,11 +45,11 @@ async def _db_reachable() -> bool:
 
 
 @pytest_asyncio.fixture
-async def db(tmp_path_factory):
-    if not await _db_reachable():
-        pytest.skip(f"No database reachable at {DB_URL}")
+async def db(test_database_url):
+    if not await _db_reachable(test_database_url):
+        pytest.skip(f"No database reachable at {test_database_url}")
 
-    engine = create_async_engine(DB_URL)
+    engine = create_async_engine(test_database_url)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with maker() as session:

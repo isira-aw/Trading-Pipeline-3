@@ -31,14 +31,8 @@ STRICT_GATE = {
     "max_drawdown_pct": 15,
 }
 
-DB_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/trading_pipeline",
-)
-
-
-async def _db_reachable() -> bool:
-    engine = create_async_engine(DB_URL)
+async def _db_reachable(db_url) -> bool:
+    engine = create_async_engine(db_url)
     try:
         async with engine.connect():
             return True
@@ -55,11 +49,11 @@ async def _set(session, key, value):
 
 
 @pytest_asyncio.fixture
-async def db():
-    if not await _db_reachable():
-        pytest.skip(f"No database reachable at {DB_URL}")
+async def db(test_database_url):
+    if not await _db_reachable(test_database_url):
+        pytest.skip(f"No database reachable at {test_database_url}")
 
-    engine = create_async_engine(DB_URL)
+    engine = create_async_engine(test_database_url)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with maker() as session:
@@ -83,13 +77,26 @@ async def db():
 
 
 @pytest_asyncio.fixture
-async def client(db):
+async def client(db, test_database_url):
     from app.main import app
+    from app.db.session import get_db
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        yield c
+    engine = create_async_engine(test_database_url)
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _override_get_db():
+        async with maker() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        await engine.dispose()
 
 
 async def _round_trips(db, count, win_ratio=1.0, days_ago=60, entry=100.0):
