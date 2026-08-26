@@ -163,6 +163,7 @@ export interface ModelRow {
   file_size_bytes: number | null;
   file_missing: boolean;
   metrics: Record<string, number | null>;
+  feature_importance: Record<string, number>;
   score: number;
   score_breakdown: Record<string, number>;
   disqualified: boolean;
@@ -259,6 +260,32 @@ export const switchStage = (stage: string, pin: string) =>
     "/api/stage/switch",
     { stage, pin },
   );
+
+export interface Performance {
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  total_realized_pnl: number;
+  total_fees: number;
+  max_drawdown_pct: number;
+  open_lots: number;
+  stage: string;
+}
+
+export interface DownloadProgress {
+  running: boolean;
+  symbols: string[];
+  completed: number;
+  total: number;
+  current: string | null;
+  progress: number;
+}
+
+export const getPerformance = () => apiGet<Performance>("/api/performance");
+export const getDownloadProgress = () =>
+  apiGet<DownloadProgress>("/api/data/download/progress");
+export const trainAll = () => apiPost("/api/models/train-all");
 
 export const getStatus = () => apiGet<SystemStatus>("/api/status");
 export const getTrades = () => apiGet<{ trades: Trade[] }>("/api/trades?limit=25");

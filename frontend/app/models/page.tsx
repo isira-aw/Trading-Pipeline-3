@@ -247,6 +247,43 @@ export default function ModelsPage() {
   );
 }
 
+function FeatureImportance({
+  importance,
+}: {
+  importance: Record<string, number> | undefined;
+}) {
+  const entries = Object.entries(importance ?? {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12);
+
+  if (entries.length === 0) {
+    return <p className="mt-2 text-xs text-zinc-500">No importance recorded.</p>;
+  }
+
+  const max = entries[0][1] || 1;
+
+  return (
+    <ul className="mt-2 space-y-1">
+      {entries.map(([name, value]) => (
+        <li key={name} className="flex items-center gap-2">
+          <span className="w-36 shrink-0 truncate text-xs text-zinc-500">
+            {name}
+          </span>
+          <span className="h-2 flex-1 rounded bg-zinc-200 dark:bg-zinc-800">
+            <span
+              className="block h-2 rounded bg-blue-500"
+              style={{ width: `${(value / max) * 100}%` }}
+            />
+          </span>
+          <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums">
+            {value.toFixed(3)}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function ModelCard({
   model,
   weights,
@@ -410,6 +447,13 @@ function ModelCard({
             {model.notes && (
               <p className="mt-2 text-xs text-zinc-500">{model.notes}</p>
             )}
+          </div>
+
+          <div className="sm:col-span-2">
+            <h3 className="text-xs font-semibold uppercase text-zinc-500">
+              Feature importance
+            </h3>
+            <FeatureImportance importance={model.feature_importance} />
           </div>
         </div>
       )}

@@ -174,3 +174,59 @@ class TestEventBus:
         assert bus.subscriber_count == 1
         bus.unsubscribe(queue)
         assert bus.subscriber_count == 0
+
+
+class TestDownloadProgress:
+    """Progress reporting for the WebSocket events and the poll fallback."""
+
+    def setup_method(self):
+        from app.services import data_downloader as dd
+        dd._progress.update(
+            {"running": False, "symbols": [], "completed": 0, "current": None}
+        )
+
+    def test_idle_progress_is_zero_not_a_division_error(self):
+        from app.services.data_downloader import get_progress
+
+        snapshot = get_progress()
+        assert snapshot["total"] == 0
+        assert snapshot["progress"] == 0.0
+        assert snapshot["running"] is False
+
+    def test_publish_updates_the_snapshot(self):
+        from app.services.data_downloader import _publish, _progress, get_progress
+
+        _progress.update({"symbols": ["A", "B", "C", "D"]})
+        _publish("B", 1, 4, "downloading")
+
+        snapshot = get_progress()
+        assert snapshot["current"] == "B"
+        assert snapshot["completed"] == 1
+        assert snapshot["progress"] == pytest.approx(0.25)
+        assert snapshot["running"] is True
+
+    def test_complete_phase_clears_running(self):
+        from app.services.data_downloader import _publish, _progress, get_progress
+
+        _progress.update({"symbols": ["A", "B"]})
+        _publish(None, 2, 2, "complete")
+
+        snapshot = get_progress()
+        assert snapshot["running"] is False
+        assert snapshot["progress"] == pytest.approx(1.0)
+
+    def test_progress_is_published_on_the_bus(self):
+        from app.services import data_downloader as dd
+        from app.services.event_bus import EVENT_DATA_DOWNLOAD, bus
+
+        queue = bus.subscribe()
+        try:
+            dd._progress.update({"symbols": ["A", "B"]})
+            dd._publish("A", 1, 2, "symbol_complete")
+
+            message = queue.get_nowait()
+            assert message["event"] == EVENT_DATA_DOWNLOAD
+            assert message["symbol"] == "A"
+            assert message["progress"] == pytest.approx(0.5)
+        finally:
+            bus.unsubscribe(queue)

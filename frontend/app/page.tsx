@@ -16,7 +16,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import AdvisoryPanel from "@/app/components/AdvisoryPanel";
+import GateProgress from "@/app/components/GateProgress";
 import HaltBanner from "@/app/components/HaltBanner";
+import PerformancePanel from "@/app/components/PerformancePanel";
 import LiquidatePanel from "@/app/components/LiquidatePanel";
 import NavBar from "@/app/components/NavBar";
 import PositionsTable from "@/app/components/PositionsTable";
@@ -28,13 +30,20 @@ import {
   emergencyStop,
   generateAdvisory,
   getAdvisories,
+  getDownloadProgress,
+  getGate,
+  getPerformance,
   getPositions,
   getStatus,
   getTrades,
   getWallet,
   startSystem,
   stopSystem,
+  trainAll,
   type AdvisoriesResponse,
+  type DownloadProgress,
+  type GateStatus,
+  type Performance,
   type Position,
   type SystemStatus,
   type Trade,
@@ -62,6 +71,11 @@ export default function Dashboard() {
   const [walletError, setWalletError] = useState<string | null>(null);
   const [advisories, setAdvisories] = useState<AdvisoriesResponse | null>(null);
   const [advisoriesError, setAdvisoriesError] = useState<string | null>(null);
+  const [performance, setPerformance] = useState<Performance | null>(null);
+  const [performanceError, setPerformanceError] = useState<string | null>(null);
+  const [gate, setGate] = useState<GateStatus | null>(null);
+  const [gateError, setGateError] = useState<string | null>(null);
+  const [download, setDownload] = useState<DownloadProgress | null>(null);
   const [wsState, setWsState] = useState<ConnectionState>("connecting");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -116,6 +130,31 @@ export default function Dashboard() {
     }
   }, []);
 
+  const refreshPerformance = useCallback(async () => {
+    const result = await getPerformance();
+    if (result.ok) {
+      setPerformance(result.data);
+      setPerformanceError(null);
+    } else {
+      setPerformanceError(result.error);
+    }
+  }, []);
+
+  const refreshGate = useCallback(async () => {
+    const result = await getGate();
+    if (result.ok) {
+      setGate(result.data);
+      setGateError(null);
+    } else {
+      setGateError(result.error);
+    }
+  }, []);
+
+  const refreshDownload = useCallback(async () => {
+    const result = await getDownloadProgress();
+    if (result.ok) setDownload(result.data);
+  }, []);
+
   const refreshAll = useCallback(async () => {
     await Promise.all([
       refreshStatus(),
@@ -123,13 +162,25 @@ export default function Dashboard() {
       refreshPositions(),
       refreshWallet(),
       refreshAdvisories(),
+      refreshPerformance(),
+      refreshGate(),
+      refreshDownload(),
     ]);
-  }, [refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories]);
+  }, [
+    refreshStatus, refreshTrades, refreshPositions, refreshWallet,
+    refreshAdvisories, refreshPerformance, refreshGate, refreshDownload,
+  ]);
 
   // Keep the latest refreshers reachable from the WebSocket callback without
   // tearing down and rebuilding the socket on every render.
-  const handlers = useRef({ refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories });
-  handlers.current = { refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories };
+  const handlers = useRef({
+    refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet,
+    refreshAdvisories, refreshPerformance, refreshGate, refreshDownload,
+  });
+  handlers.current = {
+    refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet,
+    refreshAdvisories, refreshPerformance, refreshGate, refreshDownload,
+  };
 
   useEffect(() => {
     void refreshAll();
@@ -145,6 +196,18 @@ export default function Dashboard() {
           case "trade_event":
             void handlers.current.refreshTrades();
             void handlers.current.refreshPositions();
+            void handlers.current.refreshPerformance();
+            void handlers.current.refreshGate();
+            break;
+          case "data_download_progress":
+            setDownload({
+              running: event.phase !== "complete",
+              symbols: [],
+              completed: Number(event.completed ?? 0),
+              total: Number(event.total ?? 0),
+              current: (event.symbol as string) ?? null,
+              progress: Number(event.progress ?? 0),
+            });
             break;
           case "wallet_update":
             void handlers.current.refreshWallet();
@@ -282,6 +345,13 @@ export default function Dashboard() {
             Stop
           </button>
           <button
+            onClick={() => void runAction(trainAll, "Train")}
+            disabled={busy}
+            className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          >
+            Train Now
+          </button>
+          <button
             onClick={() => void runAction(generateAdvisory, "LLM advisory")}
             disabled={busy}
             className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
@@ -306,6 +376,25 @@ export default function Dashboard() {
           )}
         </div>
 
+        {download?.running && (
+          <div className="rounded-lg border border-blue-300 bg-blue-500/10 p-3 dark:border-blue-900">
+            <div className="flex justify-between text-xs">
+              <span>
+                Downloading data{download.current ? ` — ${download.current}` : ""}
+              </span>
+              <span className="font-mono tabular-nums">
+                {download.completed}/{download.total}
+              </span>
+            </div>
+            <div className="mt-1 h-1.5 w-full rounded bg-zinc-200 dark:bg-zinc-800">
+              <div
+                className="h-1.5 rounded bg-blue-500 transition-all"
+                style={{ width: `${download.progress * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
+
         {/* Component status strip (§8.1) */}
         {status && <StatusStrip components={status.components} />}
 
@@ -315,6 +404,11 @@ export default function Dashboard() {
           <div className="lg:col-span-2">
             <PositionsTable positions={positions} error={positionsError} />
           </div>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <PerformancePanel data={performance} error={performanceError} />
+          <GateProgress gate={gate} error={gateError} />
         </div>
 
         <div className="grid gap-4 lg:grid-cols-3">
