@@ -52,6 +52,36 @@ STAGE_SETUP = "setup"
 
 scheduler: AsyncIOScheduler | None = None
 
+# Config key -> (job id, trigger builder). APScheduler bakes a trigger's
+# interval in at add_job time, so a config value changed after startup would
+# otherwise not take effect until the process restarts — see
+# `reschedule_job_for_config`.
+INTERVAL_JOB_MAP = {
+    "trade_loop_interval_minutes": ("trade_loop", lambda v: IntervalTrigger(minutes=v)),
+    "heartbeat_interval_seconds": ("heartbeat", lambda v: IntervalTrigger(seconds=v)),
+    "reconcile_interval_minutes": ("reconcile", lambda v: IntervalTrigger(minutes=v)),
+    "retrain_interval_hours": ("retrain", lambda v: IntervalTrigger(hours=v)),
+    "data_refresh_hour_utc": ("data_refresh", lambda v: CronTrigger(hour=v, minute=0)),
+}
+
+
+def reschedule_job_for_config(key: str, value) -> bool:
+    """Apply a changed scheduler-interval config value to the live job (§3).
+
+    Called from the Settings save path so these keys behave like every other
+    config value: a save takes effect immediately, with no service restart.
+    Returns True if a job was actually rescheduled.
+    """
+    if scheduler is None or not scheduler.running:
+        return False
+    mapping = INTERVAL_JOB_MAP.get(key)
+    if mapping is None:
+        return False
+    job_id, build_trigger = mapping
+    scheduler.reschedule_job(job_id, trigger=build_trigger(value))
+    logger.info("Rescheduled job %r for changed config %s=%r", job_id, key, value)
+    return True
+
 
 # --------------------------------------------------------------------------
 # Helpers

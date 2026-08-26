@@ -234,6 +234,19 @@ async def promote_model(db: AsyncSession, model_id, force: bool = False) -> dict
                 f"Use force=True to override."
             )
 
+        # Same rule as promote_best_candidate: a manual promotion is still
+        # not allowed to churn to a candidate no better than the incumbent
+        # (§5.1) — only `force` may override this.
+        current = await get_active_model(db, model.symbol)
+        if current is not None and current.id != model.id:
+            current_score = score_model(current.metrics or {}, weights, min_rate)["score"]
+            if scoring["score"] <= current_score:
+                raise ModelRegistryError(
+                    f"Model {model_id} scores {scoring['score']:.4f}, not "
+                    f"better than the active model's {current_score:.4f}. "
+                    f"Use force=True to override."
+                )
+
     archived_id = await _archive_current_active(db, model.symbol)
     model.status = STATUS_ACTIVE
     await db.flush()

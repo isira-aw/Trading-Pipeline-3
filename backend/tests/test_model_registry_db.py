@@ -229,3 +229,28 @@ class TestPromotionGuards:
         result = await promote_best_candidate(db, TEST_SYMBOL)
         assert not result["promoted"]
         assert result["candidates_considered"] == 0
+
+    async def test_manual_promote_also_refuses_candidate_no_better_than_active(
+        self, db, tmp_path
+    ):
+        """The Models page's Promote button must obey the same incumbent
+        comparison as the automatic retrain promotion (§5.1) — a manual
+        click on a specific candidate is not a bypass."""
+        strong = await _add_candidate(db, tmp_path, 0.50, 0.70, "strong.json")
+        await promote_model(db, strong.id)
+        weak = await _add_candidate(db, tmp_path, 0.30, 0.55, "weak.json")
+
+        with pytest.raises(ModelRegistryError, match="not"):
+            await promote_model(db, weak.id)
+
+        assert (await get_active_model(db, TEST_SYMBOL)).id == strong.id
+
+    async def test_force_bypasses_incumbent_comparison(self, db, tmp_path):
+        strong = await _add_candidate(db, tmp_path, 0.50, 0.70, "strong.json")
+        await promote_model(db, strong.id)
+        weak = await _add_candidate(db, tmp_path, 0.30, 0.55, "weak.json")
+
+        result = await promote_model(db, weak.id, force=True)
+
+        assert result["forced"]
+        assert (await get_active_model(db, TEST_SYMBOL)).id == weak.id
