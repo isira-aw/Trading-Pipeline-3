@@ -1,0 +1,25 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "powershell.exe",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "Set-Location 'C:\\my git\\Trading-Pipeline-3\\backend'; $env:DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432/trading_pipeline'; & .\\venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "powershell.exe",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "Set-Location 'C:\\my git\\Trading-Pipeline-3\\frontend'; npm run dev"
+      ],
+      "port": 3000
+    }
+  ]
+}

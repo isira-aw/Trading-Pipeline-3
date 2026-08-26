@@ -99,6 +99,20 @@ export interface StuckOrder {
   detail: string | null;
 }
 
+/** A row in `job_runs` — one audit-trail entry for a download or training
+ * run, the DB-backed source of truth behind the readiness table (§8.1). */
+export interface JobRun {
+  job_id: string;
+  job_type: "download" | "training";
+  symbol: string | null;
+  status: "running" | "success" | "failed";
+  progress: number | null;
+  detail: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
 export interface SystemStatus {
   stage: string;
   halted: boolean;
@@ -112,6 +126,8 @@ export interface SystemStatus {
   scheduler_running: boolean;
   orders_needing_attention: StuckOrder[];
   websocket_clients: number;
+  latest_download: JobRun | null;
+  latest_training: JobRun | null;
 }
 
 export interface Trade {
@@ -273,18 +289,14 @@ export interface Performance {
   stage: string;
 }
 
-export interface DownloadProgress {
-  running: boolean;
-  symbols: string[];
-  completed: number;
-  total: number;
-  current: string | null;
-  progress: number;
-}
-
 export const getPerformance = () => apiGet<Performance>("/api/performance");
-export const getDownloadProgress = () =>
-  apiGet<DownloadProgress>("/api/data/download/progress");
+// Supersedes the old in-memory /api/data/download/progress poll fallback:
+// this is DB-backed (job_runs), so it also survives a backend restart and
+// answers correctly on first load, not just after a WS event.
+export const getDownloadStatus = () => apiGet<JobRun | null>("/api/data/download/status");
+export const getTrainingStatus = () => apiGet<JobRun | null>("/api/training/status");
+export const testBinanceConnection = () =>
+  apiPost<{ ok: boolean; detail: string }>("/api/system/test-binance");
 export const trainAll = () => apiPost("/api/models/train-all");
 
 export const getStatus = () => apiGet<SystemStatus>("/api/status");
@@ -302,4 +314,7 @@ export const liquidateAll = (pin: string, confirm: boolean) =>
     "/api/system/liquidate",
     { pin, confirm },
   );
-export const downloadData = () => apiPost("/api/data/download");
+export const downloadData = () =>
+  apiPost<{ status: string; job_id: string; symbols: string[]; message: string }>(
+    "/api/data/download",
+  );

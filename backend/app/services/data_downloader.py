@@ -19,40 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Candle
 from app.db.session import AsyncSessionLocal
+from app.services import job_runs
 from app.services.binance_client import get_market_data_client
 from app.services.config_service import get_config
 from app.services.event_bus import EVENT_DATA_DOWNLOAD, bus
 
 logger = logging.getLogger(__name__)
-
-# Latest download progress, for the poll fallback when a client has no
-# WebSocket (§9). In-memory: it describes a run in this process, and a
-# restart means there is no run to report on.
-_progress: dict = {"running": False, "symbols": [], "completed": 0, "current": None}
-
-
-def get_progress() -> dict:
-    """Snapshot of the current or most recent download."""
-    total = len(_progress.get("symbols") or [])
-    done = _progress.get("completed", 0)
-    return {
-        **_progress,
-        "total": total,
-        "progress": (done / total) if total else 0.0,
-    }
-
-
-def _publish(symbol: str | None, completed: int, total: int, phase: str) -> None:
-    _progress.update(
-        {"current": symbol, "completed": completed, "running": phase != "complete"}
-    )
-    bus.publish(EVENT_DATA_DOWNLOAD, {
-        "symbol": symbol,
-        "phase": phase,
-        "completed": completed,
-        "total": total,
-        "progress": (completed / total) if total else 0.0,
-    })
 
 # Binance returns klines as positional arrays.
 KLINE_OPEN_TIME = 0
@@ -148,11 +120,21 @@ async def download_historical_data(
     symbols: list[str] | None = None,
     interval: str | None = None,
     history_years: int | None = None,
+    job_id=None,
 ) -> dict:
     """Background-task entry point: download every configured symbol.
 
     Opens its own session — see the module docstring on session ownership.
     A failure on one symbol is logged and does not abort the others.
+
+    `job_id` is the `job_runs` row to report progress against. The API
+    route creates this row *before* scheduling the background task (so a
+    status poll right after the POST already sees a "running" row rather
+    than racing this task for it); the scheduled daily refresh has no
+    caller to do that, so it creates its own row here instead. This
+    supersedes an earlier in-memory progress dict, which didn't survive a
+    backend restart and couldn't answer "last run" the way an audit-trail
+    row can (and didn't cover training at all).
     """
     async with AsyncSessionLocal() as db:
         if symbols is None:
@@ -162,24 +144,53 @@ async def download_historical_data(
         if history_years is None:
             history_years = await get_config(db, "history_years")
 
-        total = len(symbols)
-        _progress.update({"running": True, "symbols": list(symbols), "completed": 0})
+        if job_id is None:
+            job = await job_runs.start_job(
+                db, job_runs.JOB_DOWNLOAD,
+                detail={"symbols": symbols, "total": len(symbols), "completed": []},
+            )
+            await db.commit()
+            job_id = job.id
 
         results = []
-        for index, symbol in enumerate(symbols):
-            _publish(symbol, index, total, "downloading")
+        had_error = False
+        for symbol in symbols:
             try:
-                results.append(
-                    await download_symbol(db, symbol, interval, history_years)
-                )
-                _publish(symbol, index + 1, total, "symbol_complete")
+                result = await download_symbol(db, symbol, interval, history_years)
             except Exception:
                 # §1.7 fail loudly, but one bad symbol must not sink the rest.
                 logger.exception("Download failed for %s", symbol)
                 await db.rollback()
-                results.append({"symbol": symbol, "error": True})
-                _publish(symbol, index + 1, total, "symbol_failed")
+                result = {"symbol": symbol, "error": True}
+                had_error = True
 
-        _publish(None, total, total, "complete")
+            results.append(result)
+            progress = len(results) / len(symbols)
+            bus.publish(EVENT_DATA_DOWNLOAD, {
+                "job_id": str(job_id), "status": "running", "progress": progress,
+                "completed": len(results), "total": len(symbols),
+                "symbol": symbol, "result": result,
+            })
+            await job_runs.update_job(
+                db, job_id, progress=progress,
+                # A copy, not `results` itself: `results` keeps growing on
+                # later iterations, and SQLAlchemy's dirty-check compares
+                # the new JSONB value against the previous one by content —
+                # a shared, still-mutating list would compare equal to
+                # itself and the UPDATE would be silently skipped.
+                detail={"symbols": symbols, "total": len(symbols), "completed": list(results)},
+            )
+            await db.commit()
 
-    return {"results": results}
+        final_status = job_runs.STATUS_FAILED if had_error else job_runs.STATUS_SUCCESS
+        await job_runs.finish_job(
+            db, job_id, status=final_status,
+            detail={"symbols": symbols, "total": len(symbols), "completed": list(results)},
+        )
+        await db.commit()
+        bus.publish(EVENT_DATA_DOWNLOAD, {
+            "job_id": str(job_id), "status": final_status, "progress": 1.0,
+            "completed": len(results), "total": len(symbols),
+        })
+
+    return {"results": results, "job_id": str(job_id)}

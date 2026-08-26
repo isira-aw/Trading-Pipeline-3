@@ -27,6 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.db.session import AsyncSessionLocal
+from app.services import job_runs
 from app.services import trading_engine as te
 from app.services.config_service import get_config
 from app.services.event_bus import (
@@ -375,7 +376,16 @@ def _publish_trade(symbol: str, side: str, outcome, note: str = "") -> None:
 
 
 async def retrain_job() -> None:
-    """Retrain every configured symbol and promote the best candidate (§5.1)."""
+    """Retrain every configured symbol and promote the best candidate (§5.1).
+
+    One `job_runs` row covers the whole batch (all symbols), mirroring the
+    download job — so "training pipeline last run" on the dashboard is a
+    single, DB-backed answer that survives a missed WebSocket event. This
+    covers the scheduled retrain and the "Train Now"/"Train All" button
+    (both invoke this job); the per-symbol Models-page retrain
+    (`train_symbol_job`) is a separate, lighter-weight path and is not
+    tracked here.
+    """
     async with AsyncSessionLocal() as db:
         try:
             symbols = await get_config(db, "symbols")
@@ -383,17 +393,28 @@ async def retrain_job() -> None:
             logger.exception("Could not read symbols for retraining")
             return
 
+        job = await job_runs.start_job(
+            db, job_runs.JOB_TRAINING, detail={"symbols": symbols, "results": {}},
+        )
+        await db.commit()
+        job_id = job.id
+
+    had_error = False
+    results: dict = {}
+
     for symbol in symbols:
         async with AsyncSessionLocal() as db:
             try:
                 bus.publish(EVENT_TRAINING_PROGRESS, {
-                    "symbol": symbol, "phase": "started", "progress": 0.0,
+                    "job_id": str(job_id), "symbol": symbol,
+                    "phase": "started", "progress": 0.0,
                 })
                 result = await train_symbol(db, symbol)
                 await db.commit()
 
                 bus.publish(EVENT_TRAINING_PROGRESS, {
-                    "symbol": symbol, "phase": "trained", "progress": 0.7,
+                    "job_id": str(job_id), "symbol": symbol,
+                    "phase": "trained", "progress": 0.7,
                     "model_id": result["model_id"],
                     "metrics": {
                         k: result["metrics"].get(k)
@@ -404,25 +425,57 @@ async def retrain_job() -> None:
                 promotion = await promote_best_candidate(db, symbol)
                 await db.commit()
 
+                results[symbol] = {
+                    "phase": "complete",
+                    "promoted": promotion.get("promoted"),
+                    "reason": promotion.get("reason"),
+                }
                 bus.publish(EVENT_TRAINING_PROGRESS, {
-                    "symbol": symbol, "phase": "complete", "progress": 1.0,
+                    "job_id": str(job_id), "symbol": symbol,
+                    "phase": "complete", "progress": 1.0,
                     "promoted": promotion.get("promoted"),
                     "reason": promotion.get("reason"),
                 })
             except (TrainingError, ModelRegistryError) as exc:
                 logger.warning("Training skipped for %s: %s", symbol, exc)
                 await db.rollback()
+                results[symbol] = {"phase": "failed", "reason": str(exc)}
+                had_error = True
                 bus.publish(EVENT_TRAINING_PROGRESS, {
-                    "symbol": symbol, "phase": "failed", "progress": 1.0,
-                    "reason": str(exc),
+                    "job_id": str(job_id), "symbol": symbol,
+                    "phase": "failed", "progress": 1.0, "reason": str(exc),
                 })
             except Exception:  # noqa: BLE001
                 logger.exception("Training failed for %s", symbol)
                 await db.rollback()
+                results[symbol] = {
+                    "phase": "failed", "reason": "Unexpected error; see logs.",
+                }
+                had_error = True
                 bus.publish(EVENT_TRAINING_PROGRESS, {
-                    "symbol": symbol, "phase": "failed", "progress": 1.0,
+                    "job_id": str(job_id), "symbol": symbol,
+                    "phase": "failed", "progress": 1.0,
                     "reason": "Unexpected error; see logs.",
                 })
+
+            progress = len(results) / len(symbols)
+            await job_runs.update_job(
+                db, job_id, progress=progress,
+                # A copy, not `results` itself: `results` keeps growing on
+                # later iterations, so a shared reference risks comparing
+                # equal to a stale tracked value and being skipped on flush
+                # (see the same fix in data_downloader.py).
+                detail={"symbols": symbols, "results": dict(results)},
+            )
+            await db.commit()
+
+    async with AsyncSessionLocal() as db:
+        await job_runs.finish_job(
+            db, job_id,
+            status=job_runs.STATUS_FAILED if had_error else job_runs.STATUS_SUCCESS,
+            detail={"symbols": symbols, "results": dict(results)},
+        )
+        await db.commit()
 
 
 async def llm_advisory_job() -> None:

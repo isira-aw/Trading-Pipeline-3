@@ -10,11 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ComponentStatus
 from app.db.session import get_db
+from app.services import job_runs
 from app.services import scheduler as scheduler_service
 from app.services import trading_engine as te
 from app.services import halt_service
 from app.services.config_service import get_config, set_config
-from app.services.event_bus import EVENT_SYSTEM, bus
+from app.services.event_bus import EVENT_COMPONENT_STATUS, EVENT_SYSTEM, bus
 from app.services.security import verify_pin
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ async def system_status(db: AsyncSession = Depends(get_db)):
 
     stuck = await te.get_orders_needing_attention(db, stage)
 
+    latest_download = await job_runs.latest_job(db, job_runs.JOB_DOWNLOAD)
+    latest_training = await job_runs.latest_job(db, job_runs.JOB_TRAINING)
+
     return {
         "stage": stage,
         # The halt overrides the stage rather than replacing it, so both are
@@ -75,7 +79,50 @@ async def system_status(db: AsyncSession = Depends(get_db)):
             for t in stuck
         ],
         "websocket_clients": bus.subscriber_count,
+        # Included here (not just via the dedicated endpoints) so a single
+        # /api/status fetch on mount is enough to render the readiness
+        # table's download/training rows correctly before any WS event.
+        "latest_download": job_runs.to_dict(latest_download),
+        "latest_training": job_runs.to_dict(latest_training),
     }
+
+
+@router.get("/training/status")
+async def training_status(db: AsyncSession = Depends(get_db)):
+    """Latest training job — lets Main/Settings show the real last-run
+    outcome on load rather than only after the next `training_progress`
+    WebSocket message (§8.1)."""
+    job = await job_runs.latest_job(db, job_runs.JOB_TRAINING)
+    return job_runs.to_dict(job)
+
+
+@router.post("/system/test-binance")
+async def test_binance_connection(db: AsyncSession = Depends(get_db)):
+    """On-demand Binance credential check (§8.1).
+
+    Separate from the passive `binance_api` row on the status table, which
+    is the scheduler's 60s heartbeat — useful right after entering new keys,
+    without waiting for the next heartbeat tick. A successful/failed check
+    also updates that same component row so the passive view reflects it
+    immediately rather than up to a heartbeat interval later.
+    """
+    stage = await get_config(db, "current_stage")
+    try:
+        state = await te.get_account_state(db, stage)
+        detail = f"Account reachable; {state.total_value_usdt:.2f} USDT total."
+        await te.set_component_status(db, "binance_api", "online", detail)
+        await db.commit()
+        bus.publish(EVENT_COMPONENT_STATUS, {
+            "component": "binance_api", "status": "online", "detail": detail,
+        })
+        return {"ok": True, "detail": detail}
+    except te.TradingEngineError as exc:
+        await te.set_component_status(db, "binance_api", "offline", str(exc))
+        await db.commit()
+        bus.publish(EVENT_COMPONENT_STATUS, {
+            "component": "binance_api", "status": "offline", "detail": str(exc),
+        })
+        return {"ok": False, "detail": str(exc)}
 
 
 @router.post("/system/start")

@@ -7,10 +7,10 @@
  * WebSocket events that trigger an immediate refresh of the affected panel.
  * Polling is the floor, not the mechanism — if the socket drops, the page
  * keeps showing true (if slightly older) data instead of silently freezing,
- * and the header says the live feed is down.
- *
- * The stage-progress widget from §8.1 is deliberately absent: the promotion
- * gate (step 12) does not exist yet, so there is nothing correct to show.
+ * and the header says the live feed is down. The same rule applies to
+ * navigating away and back: refreshAll() runs on every mount, so a download
+ * or training run already in progress renders correctly immediately,
+ * before any WebSocket event arrives — not just while the tab stayed open.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -22,6 +22,7 @@ import PerformancePanel from "@/app/components/PerformancePanel";
 import LiquidatePanel from "@/app/components/LiquidatePanel";
 import NavBar from "@/app/components/NavBar";
 import PositionsTable from "@/app/components/PositionsTable";
+import ReadinessTable from "@/app/components/ReadinessTable";
 import StatusStrip from "@/app/components/StatusStrip";
 import TradesFeed from "@/app/components/TradesFeed";
 import WalletPanel from "@/app/components/WalletPanel";
@@ -30,7 +31,6 @@ import {
   emergencyStop,
   generateAdvisory,
   getAdvisories,
-  getDownloadProgress,
   getGate,
   getPerformance,
   getPositions,
@@ -39,9 +39,9 @@ import {
   getWallet,
   startSystem,
   stopSystem,
+  testBinanceConnection,
   trainAll,
   type AdvisoriesResponse,
-  type DownloadProgress,
   type GateStatus,
   type Performance,
   type Position,
@@ -52,6 +52,10 @@ import {
 import { createWsClient, type ConnectionState } from "@/lib/ws-client";
 
 const POLL_INTERVAL_MS = 10000;
+// While a download or training run is in flight, poll faster so progress
+// (and the button re-enabling) reflects backend-confirmed completion
+// promptly instead of waiting out the idle interval.
+const ACTIVE_POLL_INTERVAL_MS = 2000;
 
 const STAGE_STYLES: Record<string, string> = {
   setup: "bg-zinc-500",
@@ -75,10 +79,17 @@ export default function Dashboard() {
   const [performanceError, setPerformanceError] = useState<string | null>(null);
   const [gate, setGate] = useState<GateStatus | null>(null);
   const [gateError, setGateError] = useState<string | null>(null);
-  const [download, setDownload] = useState<DownloadProgress | null>(null);
   const [wsState, setWsState] = useState<ConnectionState>("connecting");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // True only for the gap between clicking Download/Train and the first
+  // status refresh landing — after that, the derived flags below (backed
+  // by status.latest_download/latest_training) are the source of truth,
+  // not a local flag.
+  const [downloadTriggering, setDownloadTriggering] = useState(false);
+  const [trainTriggering, setTrainTriggering] = useState(false);
+  const [testingBinance, setTestingBinance] = useState(false);
+  const [binanceTestResult, setBinanceTestResult] = useState<string | null>(null);
 
   const refreshStatus = useCallback(async () => {
     const result = await getStatus();
@@ -150,11 +161,6 @@ export default function Dashboard() {
     }
   }, []);
 
-  const refreshDownload = useCallback(async () => {
-    const result = await getDownloadProgress();
-    if (result.ok) setDownload(result.data);
-  }, []);
-
   const refreshAll = useCallback(async () => {
     await Promise.all([
       refreshStatus(),
@@ -164,29 +170,39 @@ export default function Dashboard() {
       refreshAdvisories(),
       refreshPerformance(),
       refreshGate(),
-      refreshDownload(),
     ]);
   }, [
     refreshStatus, refreshTrades, refreshPositions, refreshWallet,
-    refreshAdvisories, refreshPerformance, refreshGate, refreshDownload,
+    refreshAdvisories, refreshPerformance, refreshGate,
   ]);
 
   // Keep the latest refreshers reachable from the WebSocket callback without
   // tearing down and rebuilding the socket on every render.
   const handlers = useRef({
     refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet,
-    refreshAdvisories, refreshPerformance, refreshGate, refreshDownload,
+    refreshAdvisories, refreshPerformance, refreshGate,
   });
   handlers.current = {
     refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet,
-    refreshAdvisories, refreshPerformance, refreshGate, refreshDownload,
+    refreshAdvisories, refreshPerformance, refreshGate,
   };
 
+  const downloading = downloadTriggering || status?.latest_download?.status === "running";
+  const trainingRunning = trainTriggering || status?.latest_training?.status === "running";
+
+  // Fetch-first, always: this runs before the WebSocket connects below, so
+  // the page shows real backend state immediately on mount (including
+  // right after navigating back from Models/Settings) rather than waiting
+  // on the next live event. The poll then keeps that true even if the
+  // socket drops, and speeds up while a download/training run is in
+  // flight so a busy button clears promptly once the backend confirms
+  // completion.
   useEffect(() => {
     void refreshAll();
-    const timer = setInterval(() => void refreshAll(), POLL_INTERVAL_MS);
+    const intervalMs = downloading || trainingRunning ? ACTIVE_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+    const timer = setInterval(() => void refreshAll(), intervalMs);
     return () => clearInterval(timer);
-  }, [refreshAll]);
+  }, [refreshAll, downloading, trainingRunning]);
 
   useEffect(() => {
     const client = createWsClient({
@@ -199,16 +215,17 @@ export default function Dashboard() {
             void handlers.current.refreshPerformance();
             void handlers.current.refreshGate();
             break;
-          case "data_download_progress":
-            setDownload({
-              running: event.phase !== "complete",
-              symbols: [],
-              completed: Number(event.completed ?? 0),
-              total: Number(event.total ?? 0),
-              current: (event.symbol as string) ?? null,
-              progress: Number(event.progress ?? 0),
-            });
+          case "data_download_progress": {
+            // The event is a live nudge to refetch, never treated as state
+            // by itself — /api/status (which carries latest_download) is
+            // the source of truth, same pattern as component_status_change.
+            const completed = event.completed ?? "?";
+            const total = event.total ?? "?";
+            setNotice(`Data download: ${completed}/${total} symbols`);
+            setDownloadTriggering(false);
+            void handlers.current.refreshStatus();
             break;
+          }
           case "wallet_update":
             void handlers.current.refreshWallet();
             break;
@@ -222,6 +239,8 @@ export default function Dashboard() {
             const symbol = String(event.symbol ?? "");
             const phase = String(event.phase ?? "");
             setNotice(`Training ${symbol}: ${phase}`);
+            setTrainTriggering(false);
+            void handlers.current.refreshStatus();
             break;
           }
           case "system_event":
@@ -246,8 +265,63 @@ export default function Dashboard() {
     }
   };
 
+  const handleDownload = async () => {
+    setDownloadTriggering(true);
+    setNotice("Data download…");
+    try {
+      const result = await downloadData();
+      if (!result.ok) {
+        setNotice(`Data download failed to start: ${result.error}`);
+        setDownloadTriggering(false);
+        return;
+      }
+      // The POST only confirms the job was *scheduled*, not finished — the
+      // button stays disabled via `downloading` (status.latest_download)
+      // until the backend reports a terminal status, not until this
+      // resolves. This is the fix for a slow download re-enabling the
+      // button early.
+      await refreshStatus();
+    } finally {
+      setDownloadTriggering(false);
+    }
+  };
+
+  const handleTrainAll = async () => {
+    setTrainTriggering(true);
+    setNotice("Training…");
+    try {
+      const result = await trainAll();
+      if (!result.ok) {
+        setNotice(`Training failed to start: ${result.error}`);
+        setTrainTriggering(false);
+        return;
+      }
+      await refreshStatus();
+    } finally {
+      setTrainTriggering(false);
+    }
+  };
+
+  const handleTestBinance = async () => {
+    setTestingBinance(true);
+    setBinanceTestResult(null);
+    try {
+      const result = await testBinanceConnection();
+      if (result.ok) {
+        setBinanceTestResult(result.data.detail);
+      } else {
+        setBinanceTestResult(`Test failed: ${result.error}`);
+      }
+      await refreshStatus();
+    } finally {
+      setTestingBinance(false);
+    }
+  };
+
   const halted = status?.halted ?? false;
   const stage = status?.stage ?? "unknown";
+  const download = status?.latest_download ?? null;
+  const downloadDetail = download?.detail as { total?: number; completed?: unknown[] } | null;
 
   return (
     <div className="min-h-screen bg-zinc-50 p-4 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 sm:p-6">
@@ -345,11 +419,11 @@ export default function Dashboard() {
             Stop
           </button>
           <button
-            onClick={() => void runAction(trainAll, "Train")}
-            disabled={busy}
+            onClick={() => void handleTrainAll()}
+            disabled={trainingRunning}
             className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
           >
-            Train Now
+            {trainingRunning ? "Training…" : "Train Now"}
           </button>
           <button
             onClick={() => void runAction(generateAdvisory, "LLM advisory")}
@@ -359,11 +433,15 @@ export default function Dashboard() {
             Get Advisory
           </button>
           <button
-            onClick={() => void runAction(downloadData, "Data download")}
-            disabled={busy}
+            onClick={() => void handleDownload()}
+            disabled={downloading}
             className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
           >
-            Download Data
+            {downloading
+              ? download?.progress != null
+                ? `Downloading… ${Math.round(download.progress * 100)}%`
+                : "Downloading…"
+              : "Download Data"}
           </button>
 
           {status && !status.trading_allowed && (
@@ -376,20 +454,18 @@ export default function Dashboard() {
           )}
         </div>
 
-        {download?.running && (
+        {download?.status === "running" && (
           <div className="rounded-lg border border-blue-300 bg-blue-500/10 p-3 dark:border-blue-900">
             <div className="flex justify-between text-xs">
-              <span>
-                Downloading data{download.current ? ` — ${download.current}` : ""}
-              </span>
+              <span>Downloading data{download.symbol ? ` — ${download.symbol}` : ""}</span>
               <span className="font-mono tabular-nums">
-                {download.completed}/{download.total}
+                {downloadDetail?.completed?.length ?? 0}/{downloadDetail?.total ?? "?"}
               </span>
             </div>
             <div className="mt-1 h-1.5 w-full rounded bg-zinc-200 dark:bg-zinc-800">
               <div
                 className="h-1.5 rounded bg-blue-500 transition-all"
-                style={{ width: `${download.progress * 100}%` }}
+                style={{ width: `${(download.progress ?? 0) * 100}%` }}
               />
             </div>
           </div>
@@ -397,6 +473,23 @@ export default function Dashboard() {
 
         {/* Component status strip (§8.1) */}
         {status && <StatusStrip components={status.components} />}
+
+        {/* System readiness table (§8.1) */}
+        {status && (
+          <ReadinessTable
+            components={status.components}
+            latestDownload={status.latest_download}
+            latestTraining={status.latest_training}
+            stage={status.stage}
+            halted={status.halted}
+            tradingEnabled={status.trading_enabled}
+            schedulerRunning={status.scheduler_running}
+            ordersNeedingAttention={status.orders_needing_attention}
+            onTestBinance={() => void handleTestBinance()}
+            testingBinance={testingBinance}
+            binanceTestResult={binanceTestResult}
+          />
+        )}
 
         {/* Panels */}
         <div className="grid gap-4 lg:grid-cols-3">
