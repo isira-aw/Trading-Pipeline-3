@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Candle
 from app.db.session import get_db
 from app.services.config_service import get_config
-from app.services.data_downloader import download_historical_data
+from app.services.data_downloader import download_historical_data, get_progress
 
 router = APIRouter()
 
@@ -36,6 +36,12 @@ async def trigger_data_download(
         "symbols": symbols,
         "message": f"Data download started in the background for {', '.join(symbols)}.",
     }
+
+
+@router.get("/download/progress")
+async def download_progress():
+    """Poll fallback for clients without a WebSocket (§9)."""
+    return get_progress()
 
 
 @router.get("/status")

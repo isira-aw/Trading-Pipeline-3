@@ -21,8 +21,38 @@ from app.db.models import Candle
 from app.db.session import AsyncSessionLocal
 from app.services.binance_client import get_market_data_client
 from app.services.config_service import get_config
+from app.services.event_bus import EVENT_DATA_DOWNLOAD, bus
 
 logger = logging.getLogger(__name__)
+
+# Latest download progress, for the poll fallback when a client has no
+# WebSocket (§9). In-memory: it describes a run in this process, and a
+# restart means there is no run to report on.
+_progress: dict = {"running": False, "symbols": [], "completed": 0, "current": None}
+
+
+def get_progress() -> dict:
+    """Snapshot of the current or most recent download."""
+    total = len(_progress.get("symbols") or [])
+    done = _progress.get("completed", 0)
+    return {
+        **_progress,
+        "total": total,
+        "progress": (done / total) if total else 0.0,
+    }
+
+
+def _publish(symbol: str | None, completed: int, total: int, phase: str) -> None:
+    _progress.update(
+        {"current": symbol, "completed": completed, "running": phase != "complete"}
+    )
+    bus.publish(EVENT_DATA_DOWNLOAD, {
+        "symbol": symbol,
+        "phase": phase,
+        "completed": completed,
+        "total": total,
+        "progress": (completed / total) if total else 0.0,
+    })
 
 # Binance returns klines as positional arrays.
 KLINE_OPEN_TIME = 0
@@ -132,16 +162,24 @@ async def download_historical_data(
         if history_years is None:
             history_years = await get_config(db, "history_years")
 
+        total = len(symbols)
+        _progress.update({"running": True, "symbols": list(symbols), "completed": 0})
+
         results = []
-        for symbol in symbols:
+        for index, symbol in enumerate(symbols):
+            _publish(symbol, index, total, "downloading")
             try:
                 results.append(
                     await download_symbol(db, symbol, interval, history_years)
                 )
+                _publish(symbol, index + 1, total, "symbol_complete")
             except Exception:
                 # §1.7 fail loudly, but one bad symbol must not sink the rest.
                 logger.exception("Download failed for %s", symbol)
                 await db.rollback()
                 results.append({"symbol": symbol, "error": True})
+                _publish(symbol, index + 1, total, "symbol_failed")
+
+        _publish(None, total, total, "complete")
 
     return {"results": results}

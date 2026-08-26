@@ -177,6 +177,16 @@ async def train(symbol: str, background_tasks: BackgroundTasks):
     return {"status": "started", "symbol": symbol}
 
 
+@router.post("/models/train-all")
+async def train_all(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    """Train every configured symbol (§8.1 "Train Now", §8.2 "Train All")."""
+    from app.services.scheduler import retrain_job
+
+    symbols = await get_config(db, "symbols")
+    background_tasks.add_task(retrain_job)
+    return {"status": "started", "symbols": symbols}
+
+
 @router.get("/models/candidates/{symbol}")
 async def candidates(symbol: str, db: AsyncSession = Depends(get_db)):
     """Ranked candidates for a symbol, best first."""
