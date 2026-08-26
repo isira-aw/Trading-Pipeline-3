@@ -104,3 +104,23 @@ class ComponentStatus(Base):
     status = Column(String(10), nullable=False)
     last_heartbeat = Column(DateTime(timezone=True), nullable=False)
     detail = Column(String)
+
+class JobRun(Base):
+    """Audit trail for background jobs (data downloads, training runs).
+
+    One row per run, not a last-known blob, matching the pattern already
+    used by risk_log/llm_advisories — so "most recent download" and
+    "training pipeline last run" survive a page navigation or a restart
+    of the frontend, not just a live WebSocket connection.
+    """
+    __tablename__ = "job_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_type = Column(String(20), nullable=False)  # download | training
+    symbol = Column(String(20))
+    status = Column(String(15), nullable=False, default="running")  # running | success | failed
+    progress = Column(Numeric)
+    detail = Column(JSONB)
+    error = Column(String)
+    started_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at = Column(DateTime(timezone=True))
