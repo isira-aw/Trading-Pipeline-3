@@ -251,6 +251,9 @@ async def get_account_state(db: AsyncSession, stage: str) -> AccountState:
         if float(entry["free"]) + float(entry["locked"]) > 0
     }
 
+    configured_symbols = await get_config(db, "symbols")
+    relevant_assets = {s[: -len(QUOTE_ASSET)] for s in configured_symbols if s.endswith(QUOTE_ASSET)}
+
     prices: dict[str, float] = {}
     for asset in balances:
         if asset == QUOTE_ASSET:
@@ -259,7 +262,10 @@ async def get_account_state(db: AsyncSession, stage: str) -> AccountState:
         try:
             prices[symbol] = market.get_symbol_price(symbol)
         except BinanceClientError:
-            logger.warning("Could not price %s", symbol)
+            if asset in relevant_assets:
+                logger.warning("Could not price %s", symbol)
+            else:
+                logger.debug("Could not price %s (not a configured symbol); excluding.", symbol)
 
     total, exposure = _price_assets(balances, prices)
     return AccountState(balances=balances, total_value_usdt=total, exposure_usdt=exposure)
