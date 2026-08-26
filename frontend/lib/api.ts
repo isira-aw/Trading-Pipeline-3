@@ -51,6 +51,32 @@ export async function apiPost<T>(
   }
 }
 
+export async function apiPut<T>(
+  path: string,
+  body?: unknown,
+): Promise<ApiResult<T>> {
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null);
+      return {
+        ok: false,
+        error: detail?.detail ?? `${response.status} ${response.statusText}`,
+      };
+    }
+    return { ok: true, data: (await response.json()) as T };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Network error",
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Response shapes
 // ---------------------------------------------------------------------------
@@ -75,6 +101,9 @@ export interface StuckOrder {
 
 export interface SystemStatus {
   stage: string;
+  halted: boolean;
+  halted_at: string | null;
+  halted_reason: string | null;
   trading_enabled: boolean;
   trading_allowed: boolean;
   trading_blocked_reason: string | null;
@@ -124,6 +153,113 @@ export interface Wallet {
   history: { at: string; total_value_usdt: number }[];
 }
 
+export interface ModelRow {
+  id: string;
+  symbol: string;
+  model_type: string;
+  status: string;
+  trained_at: string;
+  notes: string | null;
+  file_size_bytes: number | null;
+  file_missing: boolean;
+  metrics: Record<string, number | null>;
+  score: number;
+  score_breakdown: Record<string, number>;
+  disqualified: boolean;
+  disqualified_reason: string | null;
+  used_realized_stats: boolean;
+  realized: {
+    closed_trades: number;
+    win_rate: number | null;
+    total_realized_pnl: number;
+    max_drawdown_pct: number;
+  };
+}
+
+export interface ModelsResponse {
+  models: ModelRow[];
+  scoring_weights: Record<string, number>;
+  min_predicted_positive_rate: number;
+  min_trades_for_realized_score: number;
+}
+
+export interface ConfigResponse {
+  config: Record<string, unknown>;
+  defaults: Record<string, unknown>;
+  readonly_keys: string[];
+  schedule_keys: string[];
+  pin_is_default: boolean;
+}
+
+export const getModels = () => apiGet<ModelsResponse>("/api/models");
+export const promoteModel = (id: string, force = false) =>
+  apiPost(`/api/models/${id}/promote?force=${force}`);
+export const archiveModel = (id: string) => apiPost(`/api/models/${id}/archive`);
+export const promoteBest = (symbol: string) =>
+  apiPost(`/api/models/${symbol}/promote-best`);
+export const trainSymbol = (symbol: string) =>
+  apiPost(`/api/models/train/${symbol}`);
+
+export const getConfig = () => apiGet<ConfigResponse>("/api/config");
+export const updateConfig = (key: string, value: unknown) =>
+  apiPut(`/api/config/${key}`, { value });
+export const changePin = (current_pin: string, new_pin: string) =>
+  apiPost<{ changed: boolean }>("/api/config/pin", { current_pin, new_pin });
+
+export interface Advisory {
+  id: number;
+  provider: string;
+  created_at: string;
+  status: string | null;
+  uncertainty: string | null;
+  uncertainty_reason: string | null;
+  macro_summary: string | null;
+  symbols: Record<string, { view?: string; comment?: string }> | null;
+  key_risks: string[] | null;
+  error: string | null;
+}
+
+export interface AdvisoriesResponse {
+  advisories: Advisory[];
+  calls_today: number;
+  calls_rolling_24h: number;
+  cap: number;
+}
+
+export const getAdvisories = () =>
+  apiGet<AdvisoriesResponse>("/api/advisories?limit=2");
+export const generateAdvisory = () =>
+  apiPost<{ created: boolean; reason: string }>("/api/advisories/generate");
+
+export interface GateCriterion {
+  name: string;
+  label: string;
+  passed: boolean;
+  current: number | null;
+  required: number;
+  comparison: string;
+  detail: string;
+}
+
+export interface GateStatus {
+  passed: boolean;
+  criteria: GateCriterion[];
+  stats: Record<string, number | null>;
+  thresholds: Record<string, number>;
+  summary: string;
+  current_stage: string;
+  can_switch_to_live: boolean;
+  pin_is_default: boolean;
+  pin_warning: { level: string; message: string } | null;
+}
+
+export const getGate = () => apiGet<GateStatus>("/api/stage/gate");
+export const switchStage = (stage: string, pin: string) =>
+  apiPost<{ switched: boolean; to: string; pin_warning: { message: string } | null }>(
+    "/api/stage/switch",
+    { stage, pin },
+  );
+
 export const getStatus = () => apiGet<SystemStatus>("/api/status");
 export const getTrades = () => apiGet<{ trades: Trade[] }>("/api/trades?limit=25");
 export const getPositions = () => apiGet<{ positions: Position[] }>("/api/positions");
@@ -132,4 +268,11 @@ export const getWallet = () => apiGet<Wallet>("/api/wallet");
 export const startSystem = () => apiPost("/api/system/start");
 export const stopSystem = () => apiPost("/api/system/stop");
 export const emergencyStop = () => apiPost("/api/system/emergency-stop");
+export const resumeSystem = (pin: string) =>
+  apiPost<{ halted: boolean; stage: string }>("/api/system/resume", { pin });
+export const liquidateAll = (pin: string, confirm: boolean) =>
+  apiPost<{ placed_count: number; attempted_count: number; sales: unknown[] }>(
+    "/api/system/liquidate",
+    { pin, confirm },
+  );
 export const downloadData = () => apiPost("/api/data/download");

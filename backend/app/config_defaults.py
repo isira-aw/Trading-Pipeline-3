@@ -70,11 +70,36 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "reconcile_backoff_max_seconds": 1800,
 
     # --- Stage control (§5.3, §7, §10) ---
-    "current_stage": "setup",  # setup | paper | live | halted
+    # setup | paper | live. NOT 'halted' — see below.
+    "current_stage": "setup",
+    # Emergency stop (§7) is a separate flag that OVERRIDES whichever stage
+    # is active, rather than a stage value. Writing 'halted' into
+    # current_stage would destroy the record of which stage was running, so
+    # Resume would have to guess between paper and live — and guessing
+    # 'live' would put real money back to work without the gate.
+    # PIN-gated: only the emergency-stop and resume endpoints change these.
+    "halted": False,
+    "halted_at": "",
+    "halted_reason": "",
 
     # --- LLM advisor (§5.1) ---
+    # Context only. Nothing here places or blocks a trade.
     "llm_calls_per_day": 2,
     "llm_provider": "ollama",  # ollama | gemini
+    "llm_models": {"ollama": "llama3", "gemini": "gemini-1.5-flash"},
+    "llm_timeout_seconds": 60.0,
+    "llm_advisory_hours_utc": [0, 12],
+    # Optional: let an advisory flagging high uncertainty RAISE the risk
+    # engine's confidence floor. OFF by default — it is a real behaviour
+    # change to the entry rules and should be switched on deliberately.
+    "llm_confidence_adjustment_enabled": False,
+    # How much to raise the floor when uncertainty is elevated/high. Only
+    # ever raises: a negative value would loosen the floor from an LLM's
+    # opinion, so the config route refuses one.
+    "llm_uncertainty_confidence_bonus": 0.05,
+    # Advisories older than this are not attached to trades or used for the
+    # floor adjustment — stale macro context is not context.
+    "llm_advisory_max_age_hours": 36,
 
     # --- Model registry scoring (§5.1) ---
     # Weights for the components of a candidate model's score. Precision on
@@ -92,6 +117,10 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "min_trades_for_realized_score": 20,
 
     # --- Promotion gate (§5.4) ---
+    # PIN-gated: see routes_config.PROTECTED_KEYS. Editable only through
+    # PUT /api/stage/gate, because loosening a threshold is the same
+    # decision as switching stages, reached by another route.
+    "promotion_gate_changed_at": "",
     "promotion_gate": {
         "min_paper_trading_days": 30,
         "min_trade_count": 40,

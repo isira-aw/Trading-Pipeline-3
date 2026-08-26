@@ -30,6 +30,7 @@ from app.db.session import AsyncSessionLocal
 from app.services import trading_engine as te
 from app.services.config_service import get_config
 from app.services.event_bus import (
+    EVENT_ADVISORY,
     EVENT_COMPONENT_STATUS,
     EVENT_SYSTEM,
     EVENT_TRADE,
@@ -37,6 +38,7 @@ from app.services.event_bus import (
     EVENT_WALLET,
     bus,
 )
+from app.services import llm_advisor
 from app.services.model_registry import ModelRegistryError, promote_best_candidate
 from app.services.position_tracker import match_fifo
 from app.services.risk_engine import TradeProposal
@@ -72,16 +74,15 @@ async def trading_allowed(db) -> tuple[bool, str]:
     Halted overrides whichever stage was active (§7), and `trading_enabled`
     is the dashboard's Start/Stop control.
     """
+    # The halt overrides whichever stage is active (§7), so it is checked
+    # first and independently of the stage value.
+    if await get_config(db, "halted"):
+        return False, "Trading is halted (emergency stop active)."
+
     stage = await get_config(db, "current_stage")
 
-    if stage == STAGE_HALTED:
-        return False, "Trading is halted (emergency stop active)."
     if stage == STAGE_SETUP:
         return False, "Stage is 'setup'; switch to paper to begin trading."
-    if stage == te.STAGE_LIVE:
-        return False, (
-            "Live stage is not enabled: the promotion gate is not implemented."
-        )
     if not await get_config(db, "trading_enabled"):
         return False, "Trading is stopped (start it from the dashboard)."
 
@@ -167,7 +168,7 @@ async def reconcile_job() -> None:
     async with AsyncSessionLocal() as db:
         try:
             stage = await get_config(db, "current_stage")
-            if stage in (STAGE_SETUP, te.STAGE_LIVE):
+            if stage == STAGE_SETUP:
                 return
             results = await te.reconcile_open_orders(db, stage)
             for result in results:
@@ -424,6 +425,43 @@ async def retrain_job() -> None:
                 })
 
 
+async def llm_advisory_job() -> None:
+    """Fetch a macro advisory (§5.1).
+
+    Context only: nothing this job produces can place or block a trade. A
+    provider outage is recorded and the cycle skipped — it must never reach
+    APScheduler, which would drop the job permanently (§1.7).
+    """
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await llm_advisor.generate_advisory(db)
+
+            if result.created:
+                await _publish_component(
+                    db, "llm_advisor", "online",
+                    f"Advisory from {result.provider}: "
+                    f"uncertainty={(result.response or {}).get('uncertainty')}",
+                )
+                bus.publish(EVENT_ADVISORY, {
+                    "advisory_id": result.advisory_id,
+                    "provider": result.provider,
+                    "uncertainty": (result.response or {}).get("uncertainty"),
+                })
+            elif "cap" in result.reason.lower():
+                # Not a failure: the cap doing its job.
+                await _publish_component(
+                    db, "llm_advisor", "online", result.reason
+                )
+            else:
+                await _publish_component(
+                    db, "llm_advisor", "error", result.reason
+                )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("LLM advisory job failed")
+            await db.rollback()
+
+
 async def data_refresh_job() -> None:
     """Keep candles current (§5.1)."""
     from app.services.data_downloader import download_historical_data
@@ -452,6 +490,7 @@ async def start_scheduler() -> AsyncIOScheduler:
         reconcile_minutes = await get_config(db, "reconcile_interval_minutes")
         retrain_hours = await get_config(db, "retrain_interval_hours")
         refresh_hour = await get_config(db, "data_refresh_hour_utc")
+        advisory_hours = await get_config(db, "llm_advisory_hours_utc")
 
     scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -478,6 +517,11 @@ async def start_scheduler() -> AsyncIOScheduler:
         data_refresh_job, CronTrigger(hour=refresh_hour, minute=0),
         id="data_refresh", replace_existing=True, max_instances=1,
     )
+    scheduler.add_job(
+        llm_advisory_job,
+        CronTrigger(hour=",".join(str(h) for h in advisory_hours), minute=5),
+        id="llm_advisory", replace_existing=True, max_instances=1, coalesce=True,
+    )
 
     scheduler.start()
     logger.info(
@@ -498,7 +542,7 @@ async def run_startup_reconciliation() -> None:
     async with AsyncSessionLocal() as db:
         try:
             stage = await get_config(db, "current_stage")
-            if stage in (STAGE_SETUP, te.STAGE_LIVE):
+            if stage == STAGE_SETUP:
                 return
             results = await te.reconcile_open_orders(db, stage)
             if results:
@@ -506,6 +550,50 @@ async def run_startup_reconciliation() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("Startup reconciliation failed")
             await db.rollback()
+
+
+async def reschedule_jobs() -> bool:
+    """Rebuild job triggers from the current config (§8.3 "no restart needed").
+
+    Interval values are baked into a trigger when the job is added, so a
+    changed interval in the config table has no effect until the trigger is
+    replaced. Everything else the jobs read is fetched per run and needs no
+    action here.
+
+    Returns False when the scheduler is not running (nothing to reschedule).
+    """
+    global scheduler
+
+    if scheduler is None or not scheduler.running:
+        return False
+
+    async with AsyncSessionLocal() as db:
+        trade_minutes = await get_config(db, "trade_loop_interval_minutes")
+        heartbeat_seconds = await get_config(db, "heartbeat_interval_seconds")
+        reconcile_minutes = await get_config(db, "reconcile_interval_minutes")
+        retrain_hours = await get_config(db, "retrain_interval_hours")
+        refresh_hour = await get_config(db, "data_refresh_hour_utc")
+        advisory_hours = await get_config(db, "llm_advisory_hours_utc")
+
+    scheduler.reschedule_job("trade_loop", trigger=IntervalTrigger(minutes=trade_minutes))
+    scheduler.reschedule_job("heartbeat", trigger=IntervalTrigger(seconds=heartbeat_seconds))
+    scheduler.reschedule_job("reconcile", trigger=IntervalTrigger(minutes=reconcile_minutes))
+    scheduler.reschedule_job("retrain", trigger=IntervalTrigger(hours=retrain_hours))
+    scheduler.reschedule_job(
+        "data_refresh", trigger=CronTrigger(hour=refresh_hour, minute=0)
+    )
+    scheduler.reschedule_job(
+        "llm_advisory",
+        trigger=CronTrigger(hour=",".join(str(h) for h in advisory_hours), minute=5),
+    )
+
+    logger.info(
+        "Rescheduled jobs: trade loop %smin, heartbeat %ss, reconcile %smin, "
+        "retrain %sh.",
+        trade_minutes, heartbeat_seconds, reconcile_minutes, retrain_hours,
+    )
+    bus.publish(EVENT_SYSTEM, {"level": "info", "message": "Schedule updated."})
+    return True
 
 
 async def shutdown_scheduler() -> None:

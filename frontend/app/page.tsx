@@ -15,6 +15,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import AdvisoryPanel from "@/app/components/AdvisoryPanel";
+import HaltBanner from "@/app/components/HaltBanner";
+import LiquidatePanel from "@/app/components/LiquidatePanel";
+import NavBar from "@/app/components/NavBar";
 import PositionsTable from "@/app/components/PositionsTable";
 import StatusStrip from "@/app/components/StatusStrip";
 import TradesFeed from "@/app/components/TradesFeed";
@@ -22,12 +26,15 @@ import WalletPanel from "@/app/components/WalletPanel";
 import {
   downloadData,
   emergencyStop,
+  generateAdvisory,
+  getAdvisories,
   getPositions,
   getStatus,
   getTrades,
   getWallet,
   startSystem,
   stopSystem,
+  type AdvisoriesResponse,
   type Position,
   type SystemStatus,
   type Trade,
@@ -53,6 +60,8 @@ export default function Dashboard() {
   const [positionsError, setPositionsError] = useState<string | null>(null);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [walletError, setWalletError] = useState<string | null>(null);
+  const [advisories, setAdvisories] = useState<AdvisoriesResponse | null>(null);
+  const [advisoriesError, setAdvisoriesError] = useState<string | null>(null);
   const [wsState, setWsState] = useState<ConnectionState>("connecting");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -97,19 +106,30 @@ export default function Dashboard() {
     }
   }, []);
 
+  const refreshAdvisories = useCallback(async () => {
+    const result = await getAdvisories();
+    if (result.ok) {
+      setAdvisories(result.data);
+      setAdvisoriesError(null);
+    } else {
+      setAdvisoriesError(result.error);
+    }
+  }, []);
+
   const refreshAll = useCallback(async () => {
     await Promise.all([
       refreshStatus(),
       refreshTrades(),
       refreshPositions(),
       refreshWallet(),
+      refreshAdvisories(),
     ]);
-  }, [refreshStatus, refreshTrades, refreshPositions, refreshWallet]);
+  }, [refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories]);
 
   // Keep the latest refreshers reachable from the WebSocket callback without
   // tearing down and rebuilding the socket on every render.
-  const handlers = useRef({ refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet });
-  handlers.current = { refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet };
+  const handlers = useRef({ refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories });
+  handlers.current = { refreshAll, refreshStatus, refreshTrades, refreshPositions, refreshWallet, refreshAdvisories };
 
   useEffect(() => {
     void refreshAll();
@@ -131,6 +151,9 @@ export default function Dashboard() {
             break;
           case "component_status_change":
             void handlers.current.refreshStatus();
+            break;
+          case "llm_advisory":
+            void handlers.current.refreshAdvisories();
             break;
           case "training_progress": {
             const symbol = String(event.symbol ?? "");
@@ -160,7 +183,7 @@ export default function Dashboard() {
     }
   };
 
-  const halted = status?.stage === "halted";
+  const halted = status?.halted ?? false;
   const stage = status?.stage ?? "unknown";
 
   return (
@@ -170,6 +193,7 @@ export default function Dashboard() {
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-semibold">Trading Pipeline</h1>
+            <NavBar />
             <span
               className={`rounded px-2 py-0.5 text-xs font-medium uppercase text-white ${
                 STAGE_STYLES[stage] ?? "bg-zinc-500"
@@ -204,17 +228,9 @@ export default function Dashboard() {
           </button>
         </header>
 
-        {/* Halt banner (§7) */}
-        {halted && (
-          <div className="rounded-lg border border-red-500 bg-red-500/10 p-4">
-            <p className="font-semibold text-red-600 dark:text-red-400">
-              TRADING HALTED — Emergency stop active
-            </p>
-            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-              Existing holdings were not liquidated. Resuming requires the stage
-              PIN (not yet implemented — step 10).
-            </p>
-          </div>
+        {/* Halt banner with Resume (§7) */}
+        {status && (
+          <HaltBanner status={status} onResumed={() => void refreshAll()} />
         )}
 
         {/* Stuck orders (§1.7) */}
@@ -266,6 +282,13 @@ export default function Dashboard() {
             Stop
           </button>
           <button
+            onClick={() => void runAction(generateAdvisory, "LLM advisory")}
+            disabled={busy}
+            className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          >
+            Get Advisory
+          </button>
+          <button
             onClick={() => void runAction(downloadData, "Data download")}
             disabled={busy}
             className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
@@ -294,7 +317,14 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <TradesFeed trades={trades} error={tradesError} />
+        <div className="grid gap-4 lg:grid-cols-3">
+          <AdvisoryPanel data={advisories} error={advisoriesError} />
+          <div className="lg:col-span-2">
+            <TradesFeed trades={trades} error={tradesError} />
+          </div>
+        </div>
+
+        <LiquidatePanel onDone={() => void refreshAll()} />
 
         <footer className="pt-2 text-xs text-zinc-500">
           {status?.scheduler_running

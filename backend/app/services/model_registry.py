@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from xgboost import XGBClassifier
 
 from app.db.models import Model, Trade
+from app.services.training_pipeline import MODELS_STORE
 from app.services.position_tracker import match_fifo
 from app.services.config_service import get_config
 
@@ -216,7 +217,7 @@ async def promote_model(db: AsyncSession, model_id, force: bool = False) -> dict
     if model is None:
         raise ModelRegistryError(f"No model with id {model_id}")
 
-    if not Path(model.file_path).exists():
+    if resolve_model_path(model.file_path) is None:
         raise ModelRegistryError(
             f"Model file is missing at {model.file_path}; refusing to promote."
         )
@@ -309,11 +310,42 @@ async def archive_model(db: AsyncSession, model_id) -> dict:
     return {"model_id": str(model.id), "status": STATUS_ARCHIVED}
 
 
+def resolve_model_path(file_path: str) -> Path | None:
+    """Locate a model file, tolerating a moved installation.
+
+    `models.file_path` is stored absolute, so after restoring a database on
+    a machine where the project lives at a different path, every row points
+    somewhere that does not exist. Rather than declaring a perfectly good
+    model missing, the filename is also looked for in this installation's
+    own models_store.
+
+    Returns None when neither location has it.
+    """
+    path = Path(file_path)
+    if path.exists():
+        return path
+
+    relocated = MODELS_STORE / path.name
+    if relocated.exists():
+        logger.info(
+            "Model file not at its recorded path (%s); found it in this "
+            "installation's models_store instead.", file_path,
+        )
+        return relocated
+
+    return None
+
+
 def load_model_file(file_path: str) -> XGBClassifier:
     """Load a trained model from disk for inference."""
-    path = Path(file_path)
-    if not path.exists():
-        raise ModelRegistryError(f"Model file not found: {file_path}")
+    path = resolve_model_path(file_path)
+    if path is None:
+        raise ModelRegistryError(
+            f"Model file not found: {file_path} (also checked "
+            f"{MODELS_STORE / Path(file_path).name}). If this database was "
+            f"restored from another machine, copy backend/app/models_store/ "
+            f"across — the dump does not contain it."
+        )
 
     model = XGBClassifier()
     model.load_model(str(path))
