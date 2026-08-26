@@ -58,7 +58,17 @@ SCHEDULE_KEYS = {
 # VALUE_CONSTRAINTS. They are context-only settings with no path to order
 # placement, so ordinary editing is right for them; what they need is
 # validation, not protection.
-PROTECTED_KEYS = {"current_stage", "promotion_gate", "promotion_gate_changed_at"}
+PROTECTED_KEYS = {
+    "current_stage",
+    "promotion_gate",
+    "promotion_gate_changed_at",
+    # §7: the halt flag is the emergency stop. If it were writable here,
+    # a plain config PUT would clear an active halt without the PIN that
+    # Resume requires — the side door this set exists to close.
+    "halted",
+    "halted_at",
+    "halted_reason",
+}
 
 # Enumerated values. A typo here would otherwise surface much later inside
 # a scheduled job, far from the edit that caused it.

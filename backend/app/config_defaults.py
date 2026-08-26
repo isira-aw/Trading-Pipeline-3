@@ -70,7 +70,17 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "reconcile_backoff_max_seconds": 1800,
 
     # --- Stage control (§5.3, §7, §10) ---
-    "current_stage": "setup",  # setup | paper | live | halted
+    # setup | paper | live. NOT 'halted' — see below.
+    "current_stage": "setup",
+    # Emergency stop (§7) is a separate flag that OVERRIDES whichever stage
+    # is active, rather than a stage value. Writing 'halted' into
+    # current_stage would destroy the record of which stage was running, so
+    # Resume would have to guess between paper and live — and guessing
+    # 'live' would put real money back to work without the gate.
+    # PIN-gated: only the emergency-stop and resume endpoints change these.
+    "halted": False,
+    "halted_at": "",
+    "halted_reason": "",
 
     # --- LLM advisor (§5.1) ---
     # Context only. Nothing here places or blocks a trade.

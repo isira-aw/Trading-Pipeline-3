@@ -96,6 +96,19 @@ async def switch_stage(payload: StageSwitch, db: AsyncSession = Depends(get_db))
         logger.warning("Stage switch to %s refused: incorrect PIN.", target)
         raise HTTPException(status_code=403, detail="Incorrect stage PIN.")
 
+    # Closing a side door: without this, a stage switch would be a second
+    # way out of a halt that skips the Resume path and its audit trail.
+    # The halt flag would still block trading, but the state would be
+    # confusing, and confusion is the last thing wanted mid-incident.
+    if await get_config(db, "halted"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Emergency stop is active. Resume with the stage PIN before "
+                "switching stages."
+            ),
+        )
+
     current = await get_config(db, "current_stage")
     warning = _default_pin_warning(stored_hash, target)
 

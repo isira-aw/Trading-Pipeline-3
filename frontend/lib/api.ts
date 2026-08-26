@@ -101,6 +101,9 @@ export interface StuckOrder {
 
 export interface SystemStatus {
   stage: string;
+  halted: boolean;
+  halted_at: string | null;
+  halted_reason: string | null;
   trading_enabled: boolean;
   trading_allowed: boolean;
   trading_blocked_reason: string | null;
@@ -265,4 +268,11 @@ export const getWallet = () => apiGet<Wallet>("/api/wallet");
 export const startSystem = () => apiPost("/api/system/start");
 export const stopSystem = () => apiPost("/api/system/stop");
 export const emergencyStop = () => apiPost("/api/system/emergency-stop");
+export const resumeSystem = (pin: string) =>
+  apiPost<{ halted: boolean; stage: string }>("/api/system/resume", { pin });
+export const liquidateAll = (pin: string, confirm: boolean) =>
+  apiPost<{ placed_count: number; attempted_count: number; sales: unknown[] }>(
+    "/api/system/liquidate",
+    { pin, confirm },
+  );
 export const downloadData = () => apiPost("/api/data/download");

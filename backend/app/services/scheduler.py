@@ -74,10 +74,13 @@ async def trading_allowed(db) -> tuple[bool, str]:
     Halted overrides whichever stage was active (§7), and `trading_enabled`
     is the dashboard's Start/Stop control.
     """
+    # The halt overrides whichever stage is active (§7), so it is checked
+    # first and independently of the stage value.
+    if await get_config(db, "halted"):
+        return False, "Trading is halted (emergency stop active)."
+
     stage = await get_config(db, "current_stage")
 
-    if stage == STAGE_HALTED:
-        return False, "Trading is halted (emergency stop active)."
     if stage == STAGE_SETUP:
         return False, "Stage is 'setup'; switch to paper to begin trading."
     if not await get_config(db, "trading_enabled"):

@@ -16,6 +16,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import AdvisoryPanel from "@/app/components/AdvisoryPanel";
+import HaltBanner from "@/app/components/HaltBanner";
+import LiquidatePanel from "@/app/components/LiquidatePanel";
 import NavBar from "@/app/components/NavBar";
 import PositionsTable from "@/app/components/PositionsTable";
 import StatusStrip from "@/app/components/StatusStrip";
@@ -181,7 +183,7 @@ export default function Dashboard() {
     }
   };
 
-  const halted = status?.stage === "halted";
+  const halted = status?.halted ?? false;
   const stage = status?.stage ?? "unknown";
 
   return (
@@ -226,17 +228,9 @@ export default function Dashboard() {
           </button>
         </header>
 
-        {/* Halt banner (§7) */}
-        {halted && (
-          <div className="rounded-lg border border-red-500 bg-red-500/10 p-4">
-            <p className="font-semibold text-red-600 dark:text-red-400">
-              TRADING HALTED — Emergency stop active
-            </p>
-            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-              Existing holdings were not liquidated. Resuming requires the stage
-              PIN (not yet implemented — step 10).
-            </p>
-          </div>
+        {/* Halt banner with Resume (§7) */}
+        {status && (
+          <HaltBanner status={status} onResumed={() => void refreshAll()} />
         )}
 
         {/* Stuck orders (§1.7) */}
@@ -329,6 +323,8 @@ export default function Dashboard() {
             <TradesFeed trades={trades} error={tradesError} />
           </div>
         </div>
+
+        <LiquidatePanel onDone={() => void refreshAll()} />
 
         <footer className="pt-2 text-xs text-zinc-500">
           {status?.scheduler_running

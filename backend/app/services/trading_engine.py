@@ -121,6 +121,16 @@ async def assert_stage_permitted(
     the system can no longer close, which is the same reasoning that keeps
     sells exempt from the risk engine's entry rules.
     """
+    # Defence in depth: the scheduler pauses the trade loop on halt, but a
+    # manual trigger or a still-queued job must not slip an order through.
+    # Exits stay permitted — the liquidate action deliberately runs while
+    # halted, and blocking sells would strand capital.
+    if await get_config(db, "halted") and side != "sell":
+        raise StageNotPermitted(
+            "Trading is halted (emergency stop active). Resume with the "
+            "stage PIN before placing new orders. Exits remain permitted."
+        )
+
     current = await get_config(db, "current_stage")
 
     if stage != current:

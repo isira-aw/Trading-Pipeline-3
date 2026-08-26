@@ -33,7 +33,9 @@ STAGE_LIVE = "live"
 STAGE_SETUP = "setup"
 STAGE_HALTED = "halted"
 
-VALID_STAGES = (STAGE_SETUP, STAGE_PAPER, STAGE_LIVE, STAGE_HALTED)
+# 'halted' is deliberately absent: it is a flag that overrides the stage
+# (§7), not a stage you can switch to. See halt_service.
+VALID_STAGES = (STAGE_SETUP, STAGE_PAPER, STAGE_LIVE)
 
 # Bounds for the gate's own thresholds. A gate that demanded nothing would
 # be indistinguishable from no gate, so the floors are non-negotiable.
