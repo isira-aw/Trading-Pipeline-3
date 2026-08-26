@@ -215,7 +215,11 @@ async def set_component_status(
 # --------------------------------------------------------------------------
 
 
-def _price_assets(balances: dict[str, float], prices: dict[str, float]) -> tuple[float, float]:
+def _price_assets(
+    balances: dict[str, float],
+    prices: dict[str, float],
+    relevant_assets: set[str] | None = None,
+) -> tuple[float, float]:
     """Value holdings in USDT. Returns (total, non-quote exposure)."""
     total = 0.0
     exposure = 0.0
@@ -227,7 +231,12 @@ def _price_assets(balances: dict[str, float], prices: dict[str, float]) -> tuple
             continue
         price = prices.get(f"{asset}{QUOTE_ASSET}")
         if price is None:
-            logger.warning("No %s%s price; excluding from wallet value.", asset, QUOTE_ASSET)
+            if relevant_assets is None or asset in relevant_assets:
+                logger.warning("No %s%s price; excluding from wallet value.", asset, QUOTE_ASSET)
+            else:
+                logger.debug(
+                    "No %s%s price (not a configured symbol); excluding.", asset, QUOTE_ASSET
+                )
             continue
         value = amount * price
         total += value
@@ -267,7 +276,7 @@ async def get_account_state(db: AsyncSession, stage: str) -> AccountState:
             else:
                 logger.debug("Could not price %s (not a configured symbol); excluding.", symbol)
 
-    total, exposure = _price_assets(balances, prices)
+    total, exposure = _price_assets(balances, prices, relevant_assets)
     return AccountState(balances=balances, total_value_usdt=total, exposure_usdt=exposure)
 
 
