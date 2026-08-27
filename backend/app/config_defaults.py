@@ -85,8 +85,8 @@ CONFIG_DEFAULTS: dict[str, object] = {
     # --- LLM advisor (§5.1) ---
     # Context only. Nothing here places or blocks a trade.
     "llm_calls_per_day": 2,
-    "llm_provider": "ollama",  # ollama | gemini
-    "llm_models": {"ollama": "llama3", "gemini": "gemini-1.5-flash"},
+    "llm_provider": "gemini",  # ollama | gemini
+    "llm_models": {"ollama": "llama3.1", "gemini": "gemini-2.5-flash"},
     "llm_timeout_seconds": 60.0,
     "llm_advisory_hours_utc": [0, 12],
     # Optional: let an advisory flagging high uncertainty RAISE the risk

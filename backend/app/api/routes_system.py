@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import ENV_FILE, PROCESS_STARTED_AT
 from app.db.models import ComponentStatus
 from app.db.session import get_db
 from app.services import job_runs
@@ -57,6 +58,21 @@ async def system_status(db: AsyncSession = Depends(get_db)):
     latest_download = await job_runs.latest_job(db, job_runs.JOB_DOWNLOAD)
     latest_training = await job_runs.latest_job(db, job_runs.JOB_TRAINING)
 
+    # Python does not hot-reload .env — a component that looks broken right
+    # after editing an API key is, more often than not, actually just a
+    # process that hasn't picked the change up yet. This has already been
+    # mistaken for a real bug twice in this project; surface it instead of
+    # letting it recur a third time.
+    env_stale_warning = None
+    try:
+        if ENV_FILE.stat().st_mtime > PROCESS_STARTED_AT:
+            env_stale_warning = (
+                ".env was modified after this backend process started — "
+                "restart the backend for those changes to take effect."
+            )
+    except OSError:
+        pass
+
     return {
         "stage": stage,
         # The halt overrides the stage rather than replacing it, so both are
@@ -84,6 +100,7 @@ async def system_status(db: AsyncSession = Depends(get_db)):
         # table's download/training rows correctly before any WS event.
         "latest_download": job_runs.to_dict(latest_download),
         "latest_training": job_runs.to_dict(latest_training),
+        "env_stale_warning": env_stale_warning,
     }
 
 

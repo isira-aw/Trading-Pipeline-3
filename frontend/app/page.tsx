@@ -432,6 +432,17 @@ export default function Dashboard() {
           </div>
         )}
 
+        {status?.env_stale_warning && (
+          <div className="rounded-lg border border-amber-500 bg-amber-500/10 p-4 text-sm">
+            <span className="font-semibold text-amber-700 dark:text-amber-400">
+              Config change not applied:
+            </span>{" "}
+            <span className="text-zinc-600 dark:text-zinc-400">
+              {status.env_stale_warning}
+            </span>
+          </div>
+        )}
+
         {/* Controls (§8.1) */}
         <div className="flex flex-wrap items-center gap-2">
           <button

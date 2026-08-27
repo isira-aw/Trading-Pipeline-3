@@ -140,6 +140,7 @@ export interface SystemStatus {
   websocket_clients: number;
   latest_download: JobRun | null;
   latest_training: JobRun | null;
+  env_stale_warning: string | null;
 }
 
 export interface Trade {
