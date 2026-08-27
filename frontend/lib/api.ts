@@ -14,14 +14,26 @@ export type ApiResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string };
 
-export async function apiGet<T>(path: string): Promise<ApiResult<T>> {
+// `undefined` return means the request was aborted (a newer poll for the
+// same endpoint superseded it) — callers should leave existing state alone
+// rather than treat it as an error.
+export async function apiGet<T>(
+  path: string,
+  signal?: AbortSignal,
+): Promise<ApiResult<T> | undefined> {
   try {
-    const response = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
+    const response = await fetch(`${API_BASE}${path}`, {
+      cache: "no-store",
+      signal,
+    });
     if (!response.ok) {
       return { ok: false, error: `${response.status} ${response.statusText}` };
     }
     return { ok: true, data: (await response.json()) as T };
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return undefined;
+    }
     return {
       ok: false,
       error: error instanceof Error ? error.message : "Network error",
@@ -243,8 +255,8 @@ export interface AdvisoriesResponse {
   cap: number;
 }
 
-export const getAdvisories = () =>
-  apiGet<AdvisoriesResponse>("/api/advisories?limit=2");
+export const getAdvisories = (signal?: AbortSignal) =>
+  apiGet<AdvisoriesResponse>("/api/advisories?limit=2", signal);
 export const generateAdvisory = () =>
   apiPost<{ created: boolean; reason: string }>("/api/advisories/generate");
 
@@ -270,7 +282,8 @@ export interface GateStatus {
   pin_warning: { level: string; message: string } | null;
 }
 
-export const getGate = () => apiGet<GateStatus>("/api/stage/gate");
+export const getGate = (signal?: AbortSignal) =>
+  apiGet<GateStatus>("/api/stage/gate", signal);
 export const switchStage = (stage: string, pin: string) =>
   apiPost<{ switched: boolean; to: string; pin_warning: { message: string } | null }>(
     "/api/stage/switch",
@@ -289,7 +302,8 @@ export interface Performance {
   stage: string;
 }
 
-export const getPerformance = () => apiGet<Performance>("/api/performance");
+export const getPerformance = (signal?: AbortSignal) =>
+  apiGet<Performance>("/api/performance", signal);
 // Supersedes the old in-memory /api/data/download/progress poll fallback:
 // this is DB-backed (job_runs), so it also survives a backend restart and
 // answers correctly on first load, not just after a WS event.
@@ -299,10 +313,14 @@ export const testBinanceConnection = () =>
   apiPost<{ ok: boolean; detail: string }>("/api/system/test-binance");
 export const trainAll = () => apiPost("/api/models/train-all");
 
-export const getStatus = () => apiGet<SystemStatus>("/api/status");
-export const getTrades = () => apiGet<{ trades: Trade[] }>("/api/trades?limit=25");
-export const getPositions = () => apiGet<{ positions: Position[] }>("/api/positions");
-export const getWallet = () => apiGet<Wallet>("/api/wallet");
+export const getStatus = (signal?: AbortSignal) =>
+  apiGet<SystemStatus>("/api/status", signal);
+export const getTrades = (signal?: AbortSignal) =>
+  apiGet<{ trades: Trade[] }>("/api/trades?limit=25", signal);
+export const getPositions = (signal?: AbortSignal) =>
+  apiGet<{ positions: Position[] }>("/api/positions", signal);
+export const getWallet = (signal?: AbortSignal) =>
+  apiGet<Wallet>("/api/wallet", signal);
 
 export const startSystem = () => apiPost("/api/system/start");
 export const stopSystem = () => apiPost("/api/system/stop");

@@ -92,6 +92,7 @@ export default function ModelsPage() {
 
   const refresh = useCallback(async () => {
     const result = await getModels();
+    if (!result) return;
     if (result.ok) {
       setData(result.data);
       setError(null);

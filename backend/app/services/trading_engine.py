@@ -23,6 +23,7 @@ Three invariants this module exists to hold:
    into the scheduler, which would kill the trade loop silently (§1.7).
 """
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -250,7 +251,7 @@ async def get_account_state(db: AsyncSession, stage: str) -> AccountState:
     market = get_market_data_client()
 
     try:
-        account = client.client.get_account()
+        account = await asyncio.to_thread(client.client.get_account)
     except (BinanceClientError, Exception) as exc:  # noqa: BLE001
         raise TradingEngineError(f"Could not read account state: {exc}") from exc
 
@@ -263,18 +264,26 @@ async def get_account_state(db: AsyncSession, stage: str) -> AccountState:
     configured_symbols = await get_config(db, "symbols")
     relevant_assets = {s[: -len(QUOTE_ASSET)] for s in configured_symbols if s.endswith(QUOTE_ASSET)}
 
-    prices: dict[str, float] = {}
-    for asset in balances:
-        if asset == QUOTE_ASSET:
-            continue
+    # Priced concurrently, not one asset at a time — a wallet with many dust
+    # balances would otherwise hold this request's DB transaction open for
+    # up to N * REQUEST_TIMEOUT_SECONDS serially.
+    price_assets = [asset for asset in balances if asset != QUOTE_ASSET]
+
+    async def _price(asset: str) -> tuple[str, float | None]:
         symbol = f"{asset}{QUOTE_ASSET}"
         try:
-            prices[symbol] = market.get_symbol_price(symbol)
+            return symbol, await asyncio.to_thread(market.get_symbol_price, symbol)
         except BinanceClientError:
             if asset in relevant_assets:
                 logger.warning("Could not price %s", symbol)
             else:
                 logger.debug("Could not price %s (not a configured symbol); excluding.", symbol)
+            return symbol, None
+
+    priced = await asyncio.gather(*(_price(asset) for asset in price_assets))
+    prices: dict[str, float] = {
+        symbol: price for symbol, price in priced if price is not None
+    }
 
     total, exposure = _price_assets(balances, prices, relevant_assets)
     return AccountState(balances=balances, total_value_usdt=total, exposure_usdt=exposure)
@@ -353,7 +362,7 @@ async def get_lot_step(stage: str, symbol: str) -> float:
     """LOT_SIZE step for a symbol; 0 when it cannot be determined."""
     client = get_trading_client(stage)
     try:
-        info = client.client.get_symbol_info(symbol)
+        info = await asyncio.to_thread(client.client.get_symbol_info, symbol)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not fetch symbol info for %s: %s", symbol, exc)
         return 0.0

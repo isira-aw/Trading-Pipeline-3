@@ -11,6 +11,7 @@ that decision away from the operator at the worst moment. Selling is a
 separate, explicitly confirmed action.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -64,7 +65,7 @@ async def cancel_all_open_orders(db: AsyncSession, stage: str) -> CancelResult:
     symbols = await get_config(db, "symbols")
 
     try:
-        open_orders = client.client.get_open_orders()
+        open_orders = await asyncio.to_thread(client.client.get_open_orders)
     except (BinanceClientError, Exception) as exc:  # noqa: BLE001
         logger.error("Could not list open orders during halt: %s", exc)
         return CancelResult(reachable=False, error=str(exc))
@@ -73,7 +74,7 @@ async def cancel_all_open_orders(db: AsyncSession, stage: str) -> CancelResult:
         symbol = order.get("symbol")
         order_id = order.get("orderId")
         try:
-            client.client.cancel_order(symbol=symbol, orderId=order_id)
+            await asyncio.to_thread(client.client.cancel_order, symbol=symbol, orderId=order_id)
             result.cancelled.append({"symbol": symbol, "order_id": order_id})
             logger.warning("Cancelled open order %s on %s", order_id, symbol)
         except Exception as exc:  # noqa: BLE001
@@ -236,7 +237,7 @@ async def liquidate_all(
 
         symbol = f"{asset}{te.QUOTE_ASSET}"
         try:
-            price = market.get_symbol_price(symbol)
+            price = await asyncio.to_thread(market.get_symbol_price, symbol)
         except (BinanceClientError, Exception) as exc:  # noqa: BLE001
             # An asset with no USDT pair cannot be sold this way; say so
             # rather than silently leaving it out of the report.

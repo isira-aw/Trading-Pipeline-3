@@ -96,6 +96,7 @@ export default function SettingsPage() {
 
   const refresh = useCallback(async () => {
     const result = await getConfig();
+    if (!result) return;
     if (result.ok) {
       setData(result.data);
       setError(null);

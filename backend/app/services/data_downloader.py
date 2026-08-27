@@ -154,7 +154,13 @@ async def download_historical_data(
 
         results = []
         had_error = False
-        for symbol in symbols:
+        for i, symbol in enumerate(symbols):
+            if i > 0:
+                # A gap between symbols, not just within one symbol's own
+                # pagination (python-binance already sleeps every 3rd page).
+                # Weight is shared per-IP across all symbols, so back-to-back
+                # symbols with no gap is what actually exceeds it.
+                await asyncio.sleep(2)
             try:
                 result = await download_symbol(db, symbol, interval, history_years)
             except Exception:

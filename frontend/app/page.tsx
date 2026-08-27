@@ -91,8 +91,22 @@ export default function Dashboard() {
   const [testingBinance, setTestingBinance] = useState(false);
   const [binanceTestResult, setBinanceTestResult] = useState<string | null>(null);
 
+  // One AbortController per polled endpoint, keyed by name. Before firing a
+  // new request for an endpoint we abort whatever request is still pending
+  // for that same endpoint, so a slow response never leaves stacked-up
+  // in-flight fetches behind — the direct cause of Chrome's per-origin
+  // connection cap being exhausted and the backend DB pool queuing up.
+  const controllers = useRef<Record<string, AbortController>>({});
+  const startRequest = (key: string) => {
+    controllers.current[key]?.abort();
+    const controller = new AbortController();
+    controllers.current[key] = controller;
+    return controller.signal;
+  };
+
   const refreshStatus = useCallback(async () => {
-    const result = await getStatus();
+    const result = await getStatus(startRequest("status"));
+    if (!result) return;
     if (result.ok) {
       setStatus(result.data);
       setStatusError(null);
@@ -102,7 +116,8 @@ export default function Dashboard() {
   }, []);
 
   const refreshTrades = useCallback(async () => {
-    const result = await getTrades();
+    const result = await getTrades(startRequest("trades"));
+    if (!result) return;
     if (result.ok) {
       setTrades(result.data.trades);
       setTradesError(null);
@@ -112,7 +127,8 @@ export default function Dashboard() {
   }, []);
 
   const refreshPositions = useCallback(async () => {
-    const result = await getPositions();
+    const result = await getPositions(startRequest("positions"));
+    if (!result) return;
     if (result.ok) {
       setPositions(result.data.positions);
       setPositionsError(null);
@@ -122,7 +138,8 @@ export default function Dashboard() {
   }, []);
 
   const refreshWallet = useCallback(async () => {
-    const result = await getWallet();
+    const result = await getWallet(startRequest("wallet"));
+    if (!result) return;
     if (result.ok) {
       setWallet(result.data);
       setWalletError(null);
@@ -132,7 +149,8 @@ export default function Dashboard() {
   }, []);
 
   const refreshAdvisories = useCallback(async () => {
-    const result = await getAdvisories();
+    const result = await getAdvisories(startRequest("advisories"));
+    if (!result) return;
     if (result.ok) {
       setAdvisories(result.data);
       setAdvisoriesError(null);
@@ -142,7 +160,8 @@ export default function Dashboard() {
   }, []);
 
   const refreshPerformance = useCallback(async () => {
-    const result = await getPerformance();
+    const result = await getPerformance(startRequest("performance"));
+    if (!result) return;
     if (result.ok) {
       setPerformance(result.data);
       setPerformanceError(null);
@@ -152,7 +171,8 @@ export default function Dashboard() {
   }, []);
 
   const refreshGate = useCallback(async () => {
-    const result = await getGate();
+    const result = await getGate(startRequest("gate"));
+    if (!result) return;
     if (result.ok) {
       setGate(result.data);
       setGateError(null);
@@ -161,16 +181,26 @@ export default function Dashboard() {
     }
   }, []);
 
+  // Guards against overlapping ticks: if a whole refreshAll() batch is still
+  // running when the next interval fires, skip that tick rather than piling
+  // a second batch of 7 requests on top of the first.
+  const refreshInFlight = useRef(false);
   const refreshAll = useCallback(async () => {
-    await Promise.all([
-      refreshStatus(),
-      refreshTrades(),
-      refreshPositions(),
-      refreshWallet(),
-      refreshAdvisories(),
-      refreshPerformance(),
-      refreshGate(),
-    ]);
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    try {
+      await Promise.all([
+        refreshStatus(),
+        refreshTrades(),
+        refreshPositions(),
+        refreshWallet(),
+        refreshAdvisories(),
+        refreshPerformance(),
+        refreshGate(),
+      ]);
+    } finally {
+      refreshInFlight.current = false;
+    }
   }, [
     refreshStatus, refreshTrades, refreshPositions, refreshWallet,
     refreshAdvisories, refreshPerformance, refreshGate,

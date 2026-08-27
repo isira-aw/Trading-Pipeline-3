@@ -11,6 +11,7 @@ Two distinct concerns, deliberately not the same client:
 """
 
 import logging
+import time
 
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
@@ -18,6 +19,15 @@ from binance.exceptions import BinanceAPIException, BinanceRequestException
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# -1003 is Binance's "too many requests" code — distinct from a hard failure,
+# it means back off and retry, not give up. python-binance's own pagination
+# already sleeps 1s every 3rd call within a single symbol, but that alone
+# isn't enough once several symbols' weight adds up against the shared
+# per-IP budget; this is the backstop for when it still gets hit.
+RATE_LIMIT_CODE = -1003
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_BACKOFF_SECONDS = (5, 15, 30)
 
 
 class BinanceClientError(RuntimeError):
@@ -36,6 +46,13 @@ class BinanceAPIClient:
     the whole app fail to start whenever Binance is unreachable.
     """
 
+    # python-binance sits on `requests`, which has no default timeout — a
+    # stalled connection would otherwise block for as long as the OS TCP
+    # stack allows (observed: over a minute), and since every call site in
+    # this app is synchronous, that stall freezes the whole asyncio event
+    # loop, not just the caller. Every request gets this ceiling instead.
+    REQUEST_TIMEOUT_SECONDS = 10
+
     def __init__(self, testnet: bool = False):
         self.testnet = testnet
         self.api_key = settings.BINANCE_API_KEY
@@ -50,6 +67,7 @@ class BinanceAPIClient:
                     api_key=self.api_key,
                     api_secret=self.api_secret,
                     testnet=self.testnet,
+                    requests_params={"timeout": self.REQUEST_TIMEOUT_SECONDS},
                 )
             except (BinanceAPIException, BinanceRequestException, OSError) as exc:
                 raise BinanceClientError(
@@ -64,15 +82,34 @@ class BinanceAPIClient:
         """Fetch klines, paginating backward until `start_str` is reached.
 
         python-binance handles the pagination and the 1000-candle page limit.
+        A -1003 (rate limit) is retried with backoff rather than failing the
+        whole symbol outright — everything else still fails immediately.
         """
-        try:
-            return self.client.get_historical_klines(
-                symbol, interval, start_str, end_str
-            )
-        except (BinanceAPIException, BinanceRequestException, OSError) as exc:
-            raise BinanceClientError(
-                f"Failed fetching klines for {symbol} {interval}: {exc}"
-            ) from exc
+        attempt = 0
+        while True:
+            try:
+                return self.client.get_historical_klines(
+                    symbol, interval, start_str, end_str
+                )
+            except BinanceAPIException as exc:
+                if exc.code != RATE_LIMIT_CODE or attempt >= RATE_LIMIT_MAX_RETRIES:
+                    raise BinanceClientError(
+                        f"Failed fetching klines for {symbol} {interval}: {exc}"
+                    ) from exc
+                wait = RATE_LIMIT_BACKOFF_SECONDS[
+                    min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)
+                ]
+                logger.warning(
+                    "Rate limited (-1003) fetching %s %s; retrying in %ds "
+                    "(attempt %d/%d).",
+                    symbol, interval, wait, attempt + 1, RATE_LIMIT_MAX_RETRIES,
+                )
+                time.sleep(wait)
+                attempt += 1
+            except (BinanceRequestException, OSError) as exc:
+                raise BinanceClientError(
+                    f"Failed fetching klines for {symbol} {interval}: {exc}"
+                ) from exc
 
     def get_symbol_price(self, symbol: str) -> float:
         """Latest trade price for a symbol."""

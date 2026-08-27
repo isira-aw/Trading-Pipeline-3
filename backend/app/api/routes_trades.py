@@ -1,5 +1,7 @@
 """Trades, wallet and open positions (§8.1, §9)."""
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,14 +71,16 @@ async def open_positions(db: AsyncSession = Depends(get_db)):
     lots = match_fifo(records).open_lots
 
     market = get_market_data_client()
-    prices: dict[str, float | None] = {}
-    for lot in lots:
-        if lot.symbol in prices:
-            continue
+    symbols = {lot.symbol for lot in lots}
+
+    async def _price(symbol: str) -> tuple[str, float | None]:
         try:
-            prices[lot.symbol] = market.get_symbol_price(lot.symbol)
+            return symbol, await asyncio.to_thread(market.get_symbol_price, symbol)
         except (BinanceClientError, Exception):  # noqa: BLE001
-            prices[lot.symbol] = None
+            return symbol, None
+
+    priced = await asyncio.gather(*(_price(symbol) for symbol in symbols))
+    prices: dict[str, float | None] = dict(priced)
 
     positions = []
     for lot in lots:

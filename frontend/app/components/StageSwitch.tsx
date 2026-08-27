@@ -48,6 +48,7 @@ export default function StageSwitch({
 
   const refresh = useCallback(async () => {
     const result = await getGate();
+    if (!result) return;
     if (result.ok) {
       setGate(result.data);
       setError(null);
